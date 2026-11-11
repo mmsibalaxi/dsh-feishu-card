@@ -85,11 +85,54 @@ export class FeishuMedia {
     if (!key) throw new Error(`image upload returned no image_key for ${name}`)
     return key
   }
+
+  /**
+   * Upload an arbitrary file so it can be sent as a `file` message.
+   *
+   * `file_type: 'stream'` is the bucket for "anything else" — the typed buckets
+   * (`opus`, `mp4`, `pdf`, `doc`, `xls`, `ppt`) only change which renderer Feishu
+   * picks, and guessing wrong makes Feishu reject the send. The name is stored
+   * server-side at upload time, which is why the message body carries only the
+   * key.
+   */
+  async uploadFile(bytes: Uint8Array, fileName: string): Promise<string> {
+    if (bytes.byteLength === 0) throw new Error(`refusing to upload empty file ${fileName}`)
+    if (bytes.byteLength > MAX_BYTES) {
+      throw new Error(`file too large (${Math.round(bytes.byteLength / 1024)} KB)`)
+    }
+    const response = await this.client.im.v1.file.create({
+      data: {
+        file_type: 'stream',
+        file_name: safeFileName(fileName),
+        file: Buffer.from(bytes),
+      },
+    })
+    const key = response?.file_key
+    if (!key) throw new Error(`file upload returned no file_key for ${fileName}`)
+    return key
+  }
 }
 
 /** Strip path separators and anything a shell would enjoy. */
 function sanitize(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80) || 'file'
+}
+
+/**
+ * The name Feishu shows in the chat.
+ *
+ * Unlike `sanitize` (which builds a local file name) this keeps the user's own
+ * characters — a Chinese report name must survive — and only removes what the
+ * multipart form cannot carry: path separators, control characters, and a
+ * leading dot that would render as a hidden file.
+ */
+function safeFileName(name: string): string {
+  const cleaned = name
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120)
+  return cleaned && cleaned !== '.' ? cleaned : 'file'
 }
 
 const EXT_BY_KIND: Record<ResourceKind, string> = {

@@ -126,7 +126,8 @@ export declare function summaryFromAnswer(answer: string, fallback: string): str
  *      sibling id is already gone takes the whole batch down)
  */
 export declare function buildSealPlan(input: {
-    panelContent: unknown;
+    /** Inner panel fields; `undefined` when the card has no panel at all. */
+    panelContent?: unknown;
     footer: FooterInput;
     summary: string;
     removeElementIds?: string[];

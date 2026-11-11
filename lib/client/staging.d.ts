@@ -40,7 +40,10 @@ export interface Draft {
     flushIntervalMs: number;
     turnTimeoutMs: number;
     showReasoning: boolean;
+    showPanel: boolean;
     panelExpanded: boolean;
+    /** Mask secrets in group cards (default ON; DMs are never masked). */
+    redactSecrets: boolean;
     model: string;
     provider: string;
     defaultWorkspace: string;

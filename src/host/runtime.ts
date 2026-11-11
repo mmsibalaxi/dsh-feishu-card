@@ -9,6 +9,8 @@
  */
 import { homedir } from 'node:os'
 import path from 'node:path'
+import { readFile } from 'node:fs/promises'
+import { statSync } from 'node:fs'
 import * as Lark from '@larksuiteoapi/node-sdk'
 import type { Context } from '@deepseek-ai/cordis'
 import { decideAccess, describeDeny } from './access.ts'
@@ -17,11 +19,19 @@ import type { TurnEnd } from './bridge.ts'
 import { FeishuGateway, type GatewayOptions } from './gateway.ts'
 import { Dedup, normalizeInbound, sessionKeyFor, type NormalizedMessage, type RawFeishuAttachment, type RawFeishuMessage, type RawMention } from './messages.ts'
 import { FeishuSender, type SenderOptions } from './sender.ts'
-import { ACK_EMOJI, DONE_EMOJI, FeishuReactor, type ReactionOptions } from './reaction.ts'
+import {
+  ACK_EMOJI,
+  DONE_EMOJI,
+  FeishuReactor,
+  INTERRUPTED_EMOJI,
+  type ReactionOptions,
+} from './reaction.ts'
 import { FeishuQuoteFetcher, type QuoteOptions } from './quote.ts'
 import { composeTurnText, type MessageEnvelope } from './channel.ts'
 import { SessionStore } from './sessions.ts'
 import {
+  formatApprovals,
+  formatApprovalsCleared,
   formatHelp,
   formatModel,
   formatReset,
@@ -34,11 +44,14 @@ import { StreamingCard } from './card/streaming.ts'
 import { buildFooterInput } from './card/footer.ts'
 import { LarkCardTransport, type LarkCardTransportOptions } from './card/transport.ts'
 import { FeishuAskUser, type AskTransport } from './ask.ts'
+import { ApprovalMemory, FeishuApprovals } from './approvals.ts'
 import { resolveContextWindow } from './contextwin.ts'
 import { readUsage } from './usage.ts'
 import { trace } from './trace.ts'
 import { FeishuMedia } from './media.ts'
 import { createImageResolver } from './card/images.ts'
+import { baseName, findLocalFiles, stripFileLinks, type LocalRef } from './card/attachments.ts'
+import { redact } from './redact.ts'
 import { createBotOpenId, type BotInfoReader } from './bot.ts'
 import { RecentContacts, type SeenSender } from './recent.ts'
 import type { ResolvedConfig } from './config.ts'
@@ -95,6 +108,21 @@ export interface RuntimeDeps {
   names?: { user(id: string): string | undefined; rememberUsers(names: Record<string, string>): void }
   /** Shared with the panel's shortcut route when supplied. */
   recent?: RecentContacts
+}
+
+/** How a finished message looks in the reaction column. */
+export type TurnOutcome = 'answered' | 'stopped' | 'none'
+
+/**
+ * Which reaction a finished turn ends on (`undefined` = remove the receipt).
+ *
+ * 2026-11-11: a stopped turn used to end on ✅, which claims an answer that never
+ * came. `stopped` now carries the puzzled face instead.
+ */
+export function settleEmoji(outcome: TurnOutcome): string | undefined {
+  if (outcome === 'answered') return DONE_EMOJI
+  if (outcome === 'stopped') return INTERRUPTED_EMOJI
+  return undefined
 }
 
 /**
@@ -194,8 +222,19 @@ export function createRuntime(
   })
   const resolveImages = createImageResolver({
     upload: (bytes, name) => media.uploadImage(bytes, name),
+    // A local image is already on disk; reading it is the whole "fetch" step.
+    readLocal: (target) => readFileBytes(target),
     log: (message) => ctx.logger.debug(message),
   })
+  /**
+   * Local files an answer links to, and whether they are real.
+   *
+   * `exists` runs before anything is promised: an answer written on another
+   * machine routinely links a path that does not exist here, and that must
+   * drop the reference rather than announce a file nobody will receive.
+   */
+  const localFilesIn = (text: string): LocalRef[] =>
+    findLocalFiles(text, { exists: isFile })
   /**
    * Live cards, indexed both ways.
    *
@@ -268,6 +307,20 @@ export function createRuntime(
     log: (message) => ctx.logger.debug(message),
   })
   /**
+   * Approval prompts, on the same card transport.
+   *
+   * Shares `askTransport` deliberately: it owns the per-card sequence counter,
+   * and a second counter over the same card ids would collide with 300317.
+   */
+  const approvals = new FeishuApprovals({
+    transport: askTransport,
+    memory: new ApprovalMemory({
+      file: path.join(home, 'feishu-card', 'approvals.json'),
+      log: (message) => ctx.logger.debug(message),
+    }),
+    log: (message) => ctx.logger.debug(message),
+  })
+  /**
    * Own a new session in the workspace registry.
    *
    * `agents.create()` leaves the session unowned: it lands in the right
@@ -306,6 +359,7 @@ export function createRuntime(
         : undefined
     },
     ask,
+    approvals,
     attachWorkspace,
     turnTimeoutMs: read().turnTimeoutMs,
     /**
@@ -330,12 +384,30 @@ export function createRuntime(
         footerFields: config.footerFields,
         flushIntervalMs: config.flushIntervalMs,
         showReasoning: config.showReasoning,
+        showPanel: config.showPanel,
         panelExpanded: config.panelExpanded,
         sessionKey: state.sessionKey,
         // Only the person who asked may press ◯ 停止 (see handleCardAction).
         ...(state.ownerOpenId ? { stopOwnerOpenId: state.ownerOpenId } : {}),
         log: (message) => ctx.logger.debug(message),
         resolveImages,
+        // Same set the runtime uploads after the turn; the card cannot render a
+        // file, so the link becomes a 📎 hint instead of a dead path.
+        stripFileLinks: (text) => stripFileLinks(text, localFilesIn(text)),
+        // Group-only by construction: read live, so flipping the panel switch
+        // changes the very next turn without a restart.
+        ...(state.chatType === 'group'
+          ? {
+              redact: (text: string) => {
+                if (!read().redactSecrets) return text
+                const masked = redact(text)
+                if (masked.hits.length > 0) {
+                  trace('redacted', { chatId, rules: masked.hits.join(',') })
+                }
+                return masked.text
+              },
+            }
+          : {}),
         onCardId: (cardId) => {
           cardsById.set(cardId, card)
           if (cardsById.size > 500) {
@@ -529,6 +601,8 @@ export function createRuntime(
   async function handleCardAction(data: unknown): Promise<unknown> {
     const askResponse = await ask.handleCardAction(data)
     if (askResponse) return askResponse
+    const approvalResponse = await approvals.handleCardAction(data)
+    if (approvalResponse) return approvalResponse
     const value = (data as { action?: { value?: unknown } } | undefined)?.action?.value
     if (!value || typeof value !== 'object') return undefined
     const stop = value as { feishuCardStop?: unknown; sessionKey?: unknown; ownerOpenId?: unknown }
@@ -674,29 +748,29 @@ export function createRuntime(
     void reactor.ack(raw.messageId, ACK_EMOJI)
 
     // Everything below runs under one settle: the receipt is a STATE. ✅ once a
-    // reply went out (2026-11-10 feedback: a finished answer still showing "on
-    // it" is wrong), nothing at all when it did not — a check mark after a
-    // failure would be a lie.
-    const answered = await answerAccepted(raw, message, sessionKey, mentionedBotId)
-    void (answered ? reactor.settle(raw.messageId, DONE_EMOJI) : reactor.clear(raw.messageId))
+    // reply went out, 🤔 when the turn was interrupted (a stop must not claim
+    // "done", 2026-11-11), nothing at all when no answer exists.
+    const outcome = await answerAccepted(raw, message, sessionKey, mentionedBotId)
+    const emoji = settleEmoji(outcome)
+    void (emoji ? reactor.settle(raw.messageId, emoji) : reactor.clear(raw.messageId))
   }
 
   /**
    * The accepted-message path: a question for a pending ask, a slash command, or
    * a full agent turn.
    *
-   * @returns whether the sender got a reply (false = no answer was produced, so
-   * the receipt reaction is removed rather than completed)
+   * @returns `answered` (a reply went out), `stopped` (the turn was interrupted
+   * by a stop or the timeout), or `none` (nothing was produced)
    */
   async function answerAccepted(
     raw: RawFeishuMessage,
     message: NormalizedMessage,
     sessionKey: string,
     mentionedBotId: string | undefined,
-  ): Promise<boolean> {
+  ): Promise<TurnOutcome> {
     if (!message.text) {
       ctx.logger.debug(`feishu-card: empty text after mention strip in ${sessionKey}`)
-      return false
+      return 'none'
     }
 
     // A pending question owns the next message from its session, whatever it
@@ -704,7 +778,7 @@ export function createRuntime(
     const sessionId = bridge.describe(sessionKey).sessionId
     if (sessionId && ask.handleChatMessage(sessionId, message.text)) {
       trace('ask-answered', { sessionKey, length: message.text.length })
-      return false
+      return 'none'
     }
 
     // Bridge commands are answered locally and never reach the agent.
@@ -715,7 +789,7 @@ export function createRuntime(
         await handleCommand(parsed.command, sessionKey, message.chatId, parsed.args, message.senderOpenId),
         raw.messageId,
       )
-      return true
+      return 'answered'
     }
 
     ctx.logger.info(`feishu-card: turn in ${sessionKey} from ${message.senderOpenId}`)
@@ -764,7 +838,14 @@ export function createRuntime(
       if (shouldSendTextFallback(result)) {
         await sender.sendText(message.chatId, result.text, raw.messageId)
       }
-      return true
+      // Files travel separately from the card: a card has no attachment slot.
+      // Images are skipped — the seal already turned them into `img_key`s.
+      await sendLocalFiles(message.chatId, result.text, raw.messageId)
+      // A stop (or the turn timeout) is not an answer, and the receipt must say
+      // so: ✅ would claim a reply that never happened (2026-11-11).
+      return result.reason === 'stopped' || result.reason === 'timed-out'
+        ? 'stopped'
+        : 'answered'
     } catch (error) {
       ctx.logger.warn(`feishu-card: turn failed in ${sessionKey}: ${error}`)
       trace('turn-error', { sessionKey, error: String(error) })
@@ -775,7 +856,7 @@ export function createRuntime(
           raw.messageId,
         )
         .catch(() => undefined)
-      return false
+      return 'none'
     }
   }
 
@@ -866,6 +947,42 @@ export function createRuntime(
         // this message is still being written.
         return formatStop((await bridge.stop(sessionKey)) || running)
       }
+      case 'approvals': {
+        // Only the current chat's grants: a group's standing permission is not
+        // another group's business.
+        if (args[0] === 'clear') {
+          return formatApprovalsCleared(approvals.memory.forgetAll())
+        }
+        return formatApprovals(approvals.memory.list(), Date.now(), chatId)
+      }
+    }
+  }
+
+  /**
+   * Upload and post every local file the answer linked to.
+   *
+   * Best effort per file: one unreadable path must not cost the rest, and none
+   * of it may fail the turn — the answer already reached the chat.
+   */
+  async function sendLocalFiles(
+    chatId: string,
+    answer: string,
+    replyToMessageId: string,
+  ): Promise<void> {
+    const files = localFilesIn(answer).filter((file) => !file.isImage)
+    if (files.length === 0) return
+    for (const file of files) {
+      try {
+        const bytes = await readFile(file.path)
+        // `file.label` is what the link SAID; the extension lives on the path,
+        // and a Feishu attachment without one is a file nobody can open.
+        const key = await media.uploadFile(bytes, baseName(file.path))
+        await sender.sendFile(chatId, key, replyToMessageId)
+        trace('file-sent', { chatId, name: baseName(file.path), bytes: bytes.byteLength })
+      } catch (error) {
+        ctx.logger.warn(`feishu-card: file send failed for ${file.path}: ${error}`)
+        trace('file-send-failed', { chatId, path: file.path, error: String(error).slice(0, 160) })
+      }
     }
   }
 
@@ -885,6 +1002,7 @@ export function createRuntime(
     async stop() {
       connected = false
       ask.dispose()
+      approvals.dispose()
       await recent.flush()
       await gateway.stop()
       await bridge.dispose()
@@ -900,4 +1018,24 @@ export function createRuntime(
       groupAllowlist: read().groupAllowlist.length,
     }),
   }
+}
+
+/**
+ * Cheap gate for an answer's file links.
+ *
+ * Runs at seal time, before anything is promised: a path that does not exist on
+ * THIS machine (an answer written elsewhere) drops the reference instead of
+ * announcing an attachment nobody will receive.
+ */
+function isFile(target: string): boolean {
+  try {
+    return statSync(target).isFile()
+  } catch {
+    return false
+  }
+}
+
+/** Read an outbound image's bytes; failures surface in the resolver's own catch. */
+async function readFileBytes(target: string): Promise<Uint8Array> {
+  return new Uint8Array(await readFile(target))
 }

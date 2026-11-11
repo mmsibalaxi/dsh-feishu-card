@@ -87,6 +87,13 @@ export interface TurnState {
      * somebody else's long-running answer is a surprise, not a feature.
      */
     ownerOpenId?: string;
+    /**
+     * Whether this turn is answering a group or a direct chat.
+     *
+     * Carried into the card so the runtime can arm secret masking for groups
+     * only: a group card is archived and read by people who never ran the tool.
+     */
+    chatType?: 'p2p' | 'group';
 }
 export interface BridgeOptions {
     store: SessionStore;
@@ -125,6 +132,18 @@ export interface BridgeOptions {
     ask?: {
         bind(sessionId: string, chatId: string): void;
         registerTool(agentCtx: Context): void;
+    };
+    /**
+     * Feishu-side approval prompts.
+     *
+     * Same binding contract as `ask`, for the same reason: the `approval/request`
+     * listener is installed in `setup` (before the first prompt assembly) but the
+     * chat it belongs to only exists once the session does. Without it a turn
+     * driven from Feishu stalls on the desktop GUI's permission dialog.
+     */
+    approvals?: {
+        bind(sessionId: string, chatId: string): void;
+        register(agentCtx: Context): void;
     };
     /** Hard cap on one turn; the agent is cancelled when it expires. */
     turnTimeoutMs?: number;

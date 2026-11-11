@@ -35,6 +35,16 @@ export declare class FeishuMedia {
      * from; the `'avatar'` bucket would upload fine and never render.
      */
     uploadImage(bytes: Uint8Array, name: string): Promise<string>;
+    /**
+     * Upload an arbitrary file so it can be sent as a `file` message.
+     *
+     * `file_type: 'stream'` is the bucket for "anything else" — the typed buckets
+     * (`opus`, `mp4`, `pdf`, `doc`, `xls`, `ppt`) only change which renderer Feishu
+     * picks, and guessing wrong makes Feishu reject the send. The name is stored
+     * server-side at upload time, which is why the message body carries only the
+     * key.
+     */
+    uploadFile(bytes: Uint8Array, fileName: string): Promise<string>;
 }
 /**
  * Download a URL with a hard timeout, for the outbound image pipeline.

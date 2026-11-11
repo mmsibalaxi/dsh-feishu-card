@@ -35,6 +35,9 @@ const card = new StreamingCard({
   footerFields: ['status', 'model', 'elapsed', 'context'],
   flushIntervalMs: 0,
   sessionKey: 'probe-shape',
+  // `--no-panel` proves the card works with the toolbar turned off: no panel
+  // element to create, patch, or seal.
+  showPanel: !process.argv.includes('--no-panel'),
   panelModel: () => 'deepseek-v4.1-flash',
   panelRounds: () => 1,
   footerSource: () => ({
@@ -52,6 +55,15 @@ try {
 } catch (error) {
   console.error('1) create FAILED:', String(error).slice(0, 500))
   process.exit(1)
+}
+
+// `--wait N` keeps the card open for N seconds so the "思考中 Ns" ticker and the
+// panel clock actually fire against the real API.
+const waitIndex = process.argv.indexOf('--wait')
+const waitSeconds = waitIndex > 0 ? Number(process.argv[waitIndex + 1] ?? 3) : 0
+if (waitSeconds > 0) {
+  console.log(`1b) waiting ${waitSeconds}s  (watch the 思考中 Ns counter tick)`)
+  await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000))
 }
 
 try {

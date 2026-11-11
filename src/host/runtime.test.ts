@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import os from 'node:os'
 import path from 'node:path'
-import { createRuntime, shouldSendTextFallback, stopDenied, type FeishuCardRuntime, type RuntimeDeps } from './runtime.ts'
+import { createRuntime, settleEmoji, shouldSendTextFallback, stopDenied, type FeishuCardRuntime, type RuntimeDeps } from './runtime.ts'
+import { DONE_EMOJI, INTERRUPTED_EMOJI } from './reaction.ts'
 import type { RawFeishuMessage } from './messages.ts'
 import { CONFIG_DEFAULTS, type FeishuCardConfig } from '../shared/types.js'
 
@@ -548,6 +549,24 @@ describe('inbound pipeline (integration, no Feishu)', () => {
     await world.runtime.inbound(dm())
     expect(sent).toEqual([])
     expect(world.sent).toEqual([{ chatId: 'oc_dm', text: '好的，已完成' }])
+  })
+})
+
+describe('settleEmoji', () => {
+  it('ends a normal answer on ✅', () => {
+    expect(settleEmoji('answered')).toBe(DONE_EMOJI)
+  })
+
+  it('ends an interrupted turn on the puzzled face, never ✅', () => {
+    // 2026-11-11: pressing 停止 used to leave a DONE reaction on the message,
+    // claiming an answer that was cancelled mid-way.
+    expect(settleEmoji('stopped')).toBe(INTERRUPTED_EMOJI)
+    expect(settleEmoji('stopped')).not.toBe(DONE_EMOJI)
+    expect(INTERRUPTED_EMOJI).toBe('THINKING')
+  })
+
+  it('removes the receipt when nothing came back', () => {
+    expect(settleEmoji('none')).toBeUndefined()
   })
 })
 

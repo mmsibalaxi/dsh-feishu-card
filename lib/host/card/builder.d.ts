@@ -26,6 +26,8 @@ export interface BuildCardOptions {
     panelElapsedMs?: number;
     /** Include the animated dots row (false once the turn has sealed). */
     showDots?: boolean;
+    /** Include the collapsible process panel; false = a card with only the answer. */
+    showPanel?: boolean;
     /** Callback value for the in-card stop button; absent = no button. */
     stopValue?: Record<string, unknown>;
 }

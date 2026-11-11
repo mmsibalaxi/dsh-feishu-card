@@ -35,7 +35,9 @@ export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
     dedupTtlMs: Schema<number, number, "defined">;
     turnTimeoutMs: Schema<number, number, "volatile-defined">;
     showReasoning: Schema<boolean, boolean, "volatile-defined">;
+    showPanel: Schema<boolean, boolean, "volatile-defined">;
     panelExpanded: Schema<boolean, boolean, "volatile-defined">;
+    redactSecrets: Schema<boolean, boolean, "volatile-defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
     appId: Schema<string, string, "volatile">;
     appSecret: Schema<string, string, "volatile">;
@@ -59,7 +61,9 @@ export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
     dedupTtlMs: Schema<number, number, "defined">;
     turnTimeoutMs: Schema<number, number, "volatile-defined">;
     showReasoning: Schema<boolean, boolean, "volatile-defined">;
+    showPanel: Schema<boolean, boolean, "volatile-defined">;
     panelExpanded: Schema<boolean, boolean, "volatile-defined">;
+    redactSecrets: Schema<boolean, boolean, "volatile-defined">;
 }>>, "plain">;
 /** The resolved config type the host half reads. */
 export type ResolvedConfig = FeishuCardConfig;

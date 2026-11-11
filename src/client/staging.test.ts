@@ -39,6 +39,13 @@ describe('draftFrom', () => {
     d.allowlist.push('ou_2')
     expect(value.allowlist).toEqual(['ou_1'])
   })
+
+  it('shows the process panel unless it was explicitly turned off', () => {
+    // 2026-11-11: 支持关闭工具栏显示. Only an explicit `false` hides it — an
+    // older profile without the key must keep the panel.
+    expect(draftFrom(config()).showPanel).toBe(true)
+    expect(draftFrom(config({ showPanel: false })).showPanel).toBe(false)
+  })
 })
 
 describe('isDirty / sameDraft', () => {
@@ -56,6 +63,9 @@ describe('isDirty / sameDraft', () => {
   })
   it('ignores an unchanged numeric field', () => {
     expect(sameDraft(draft({ flushIntervalMs: 800 }), draft({ flushIntervalMs: 800 }))).toBe(true)
+  })
+  it('notices the toolbar toggle', () => {
+    expect(isDirty(draft({ showPanel: false }), draft())).toBe(true)
   })
 })
 

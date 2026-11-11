@@ -37,3 +37,4 @@
         turnTimeoutMs: 600000
         showReasoning: false
         panelExpanded: false
+        redactSecrets: true

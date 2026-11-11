@@ -1,4 +1,4 @@
-export declare const BRIDGE_COMMANDS: readonly ["status", "new", "stop", "help", "model"];
+export declare const BRIDGE_COMMANDS: readonly ["status", "new", "stop", "help", "model", "approvals"];
 export type BridgeCommand = (typeof BRIDGE_COMMANDS)[number];
 export interface ParsedInput {
     /** A bridge command, when the text is one. */
@@ -42,3 +42,17 @@ export declare function formatReset(done: boolean): string;
 export declare function formatStop(done: boolean): string;
 /** Renders an allowlist for diagnostics. */
 export declare function formatAllowlist(ids: readonly string[]): string;
+/**
+ * Render `/approvals`, the human-visible half of "always allow".
+ *
+ * The seam has no grant store and no revocation call, so the list a person can
+ * actually see and clear is the only thing standing between a hurried click and
+ * a standing permission nobody remembers granting.
+ */
+export declare function formatApprovals(grants: readonly {
+    chatId: string;
+    tool: string;
+    expiresAt: number;
+}[], now: number, chatId?: string): string;
+/** Confirmation for `/approvals clear`. */
+export declare function formatApprovalsCleared(count: number): string;

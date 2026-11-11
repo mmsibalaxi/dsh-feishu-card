@@ -51,7 +51,10 @@ export interface Draft {
   flushIntervalMs: number
   turnTimeoutMs: number
   showReasoning: boolean
+  showPanel: boolean
   panelExpanded: boolean
+  /** Mask secrets in group cards (default ON; DMs are never masked). */
+  redactSecrets: boolean
   model: string
   provider: string
   defaultWorkspace: string
@@ -90,7 +93,11 @@ export function draftFrom(value: FeishuCardConfig): Draft {
     flushIntervalMs: value.flushIntervalMs ?? 200,
     turnTimeoutMs: value.turnTimeoutMs ?? 600000,
     showReasoning: value.showReasoning ?? false,
+    // Default ON: only an explicit alse hides the toolbar.\r
+    showPanel: value.showPanel !== false,
     panelExpanded: value.panelExpanded ?? false,
+    // Default ON, like showPanel: only an explicit false turns masking off.
+    redactSecrets: value.redactSecrets !== false,
     model: value.model ?? '',
     provider: value.provider ?? '',
     defaultWorkspace: value.defaultWorkspace ?? '',
@@ -121,7 +128,9 @@ export function sameDraft(a: Draft, b: Draft): boolean {
     a.flushIntervalMs === b.flushIntervalMs &&
     a.turnTimeoutMs === b.turnTimeoutMs &&
     a.showReasoning === b.showReasoning &&
+    a.showPanel === b.showPanel &&
     a.panelExpanded === b.panelExpanded &&
+    a.redactSecrets === b.redactSecrets &&
     a.model === b.model &&
     a.provider === b.provider &&
     a.defaultWorkspace === b.defaultWorkspace
@@ -163,7 +172,9 @@ export function saveOps(draft: Draft, saved: Draft): PathOp[] {
   set('flushIntervalMs', draft.flushIntervalMs)
   set('turnTimeoutMs', draft.turnTimeoutMs)
   set('showReasoning', draft.showReasoning)
+  set('showPanel', draft.showPanel)
   set('panelExpanded', draft.panelExpanded)
+  set('redactSecrets', draft.redactSecrets)
   set('model', draft.model)
   set('provider', draft.provider)
   set('defaultWorkspace', draft.defaultWorkspace)
@@ -293,3 +304,4 @@ export function secretConfigured(
   const mine = namespaces.find((candidate) => candidate.ns === entryId)
   return (mine?.secrets ?? []).some((secret) => secret.set)
 }
+

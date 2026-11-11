@@ -11,11 +11,16 @@
  *   - a cache keyed by URL (the same chart referenced twice uploads once),
  *   - any failure keeps the original text, which the sanitiser then drops —
  *     no broken image element, no thrown turn.
+ *
+ * A **local** image takes the same road from the other end: the agent that
+ * plotted a chart writes `![趋势](C:\out\chart.png)` and the bytes are already
+ * on disk, so there is nothing to fetch — only to upload.
  */
 import { fetchBytes } from '../media.ts'
+import { baseName, isLocalPath, toPath } from './attachments.ts'
 
-/** `![alt](https://…)` — only absolute http(s) URLs are candidates. */
-const RE_IMAGE = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g
+/** `![alt](target)` — every target; `isLocalPath`/the http check decide which. */
+const RE_IMAGE = /!\[([^\]]*)\]\(([^)\s]+)\)/g
 
 /** How many images one answer may upload. */
 export const MAX_IMAGES_PER_ANSWER = 3
@@ -23,8 +28,15 @@ export const MAX_IMAGES_PER_ANSWER = 3
 export interface ImageResolverOptions {
   upload(bytes: Uint8Array, name: string): Promise<string>
   fetchBytes?: (url: string, timeoutMs?: number) => Promise<Uint8Array>
+  /** Read a local image; absent = local images are left untouched. */
+  readLocal?: (path: string) => Promise<Uint8Array>
   max?: number
   log?: (message: string) => void
+}
+
+/** Only the targets this module can turn into an `img_key`. */
+function isCandidate(target: string): boolean {
+  return /^https?:\/\//.test(target) || isLocalPath(target)
 }
 
 /**
@@ -36,33 +48,46 @@ export function createImageResolver(
   options: ImageResolverOptions,
 ): (text: string) => Promise<string> {
   const cache = new Map<string, string>()
-  const fetch = options.fetchBytes ?? fetchBytes
+  const fetch_ = options.fetchBytes ?? fetchBytes
   const max = options.max ?? MAX_IMAGES_PER_ANSWER
 
+  const load = async (target: string): Promise<Uint8Array> => {
+    if (isLocalPath(target)) {
+      const readLocal = options.readLocal
+      if (!readLocal) throw new Error('local images are not supported here')
+      return readLocal(toPath(target))
+    }
+    return fetch_(target)
+  }
+
   return async (text) => {
-    const urls = [...text.matchAll(RE_IMAGE)].map((match) => match[2]!)
-    if (urls.length === 0) return text
-    const unique = [...new Set(urls)].slice(0, max)
+    const targets = [...text.matchAll(RE_IMAGE)]
+      .map((match) => match[2]!)
+      .filter(isCandidate)
+    if (targets.length === 0) return text
+    const unique = [...new Set(targets)].slice(0, max)
     const keys = new Map<string, string>()
-    for (const url of unique) {
-      const cached = cache.get(url)
+    for (const target of unique) {
+      const cached = cache.get(target)
       if (cached) {
-        keys.set(url, cached)
+        keys.set(target, cached)
         continue
       }
       try {
-        const bytes = await fetch(url)
-        const name = url.split('/').pop()?.split('?')[0] || 'image.png'
+        const bytes = await load(target)
+        const name = isLocalPath(target)
+          ? baseName(toPath(target))
+          : (target.split('/').pop()?.split('?')[0] || 'image.png')
         const key = await options.upload(bytes, name)
-        cache.set(url, key)
-        keys.set(url, key)
+        cache.set(target, key)
+        keys.set(target, key)
       } catch (error) {
-        options.log?.(`feishu-card: image upload failed for ${url}: ${error}`)
+        options.log?.(`feishu-card: image upload failed for ${target}: ${error}`)
       }
     }
     if (keys.size === 0) return text
-    return text.replace(RE_IMAGE, (whole, alt: string, url: string) => {
-      const key = keys.get(url)
+    return text.replace(RE_IMAGE, (whole, alt: string, target: string) => {
+      const key = keys.get(target)
       return key ? `![${alt}](${key})` : whole
     })
   }

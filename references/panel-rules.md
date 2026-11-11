@@ -69,7 +69,7 @@ POST https://open.feishu.cn/open-apis/authen/v2/oauth/token
 15.4 **卡内停止按钮**：右下角靠 `column_set` 里一个 `width:'weighted', weight:1` 的空列推过去（`horizontal_align` 不在我们能依赖的 schema 里，未知键会让整批失败）；**红色空心圈**用 `type:'danger'` + 文本 `◯ 停止`——`⏹`（U+23F9）在飞书里渲染成蓝色方块，正是用户 2026-11-09 说不要的那个。
 15.5 **「消息栏显示什么」= `config.summary`**（会话列表/通知预览），不是 footer。seal 时用 `summaryFromAnswer(answer, status)` 给正文首句；给状态词（"已完成"）会让每个会话预览都一模一样（用户 2026-11-09：「最后回复完 不要消息栏显示已完成」）。
 15.6 **收到消息先贴一个表情**（用户 2026-11-09：「收到消息要有回复的表情」）：`POST /open-apis/im/v1/messages/{id}/reactions`，需要 `im:message.reactions:write_only`（本应用已授权），`emoji_type` 是飞书自有驼峰键（`OnIt`/`DONE`…），不是 emoji 字符。必须 best-effort：没权限/被撤回/限流都不能影响这一轮。
-15.7 **表情是「状态」，不是贴纸**（用户 2026-11-10：「回复完成之后…改成DONE」）：`OnIt` 只在「收到了、正在做」时成立；答案发出后必须换成 `DONE`（✅），**失败时直接删掉**（打勾等于撒谎）。做法：`create` 会返回 `reaction_id`，`settle()` **先加新表情再删旧的**（反过来会有一瞬间一个表情都没有，看着像被撤回），`clear()` 只删不加。真机验证：`scripts/probe-reaction.ts` 跑完用 `messageReaction.list` 复核，`remaining: ["DONE"]`。
+15.7 **表情是「状态」，不是贴纸**（用户 2026-11-10：「回复完成之后…改成DONE」）：`OnIt` 只在「收到了、正在做」时成立；答案发出后必须换成 `DONE`（✅），**失败/中断时换成 `THINKING`（🤔）或直接删掉**（打勾等于撒谎）。做法：`create` 会返回 `reaction_id`，`settle()` **先删旧表情、再加新表情**（用户 2026-11-11 明确要求这个顺序：两个状态不能同时存在；代价是失败时会空一下，所以加新失败要 best-effort 把旧表情放回去），`clear()` 只删不加。真机验证：`scripts/probe-reaction.ts` 跑完用 `messageReaction.list` 复核，`remaining: ["DONE"]`。
 15.8 **footer 的「已停止/出错」要红**：footer 是 markdown 元素，`<font color='red'>已停止</font>` 有效（hermes 的 status pill 同款）；`已完成` 保持默认色。
 15.9 **`carded` ≠ 「卡片存在」**：它只表示「正文写进卡片了」。停止的回合一个字都没有，`carded=false`，runtime 就会误以为卡片没送到而补发 `（本轮无输出）`——用户截图里那条多余的气泡。判断要用 `cardCreated + reason`（`shouldSendTextFallback()`）：**卡在 + stopped → 不发**；卡不在 → 必须发（否则用户什么都没有）。
 15.10 **斜杠命令一次只回一条消息**：`/new`、`/stop` 以前先回「正在…」再补一条结果，一次提问两条通知。命令处理改成 async、`await` 真正做完再返回**结果那一句**（并由调用方作为引用回复发出）。
@@ -79,6 +79,9 @@ POST https://open.feishu.cn/open-apis/authen/v2/oauth/token
 15.14 **`trace.log` 里必须能分辨「测试噪声」和「线上事故」**（第 28 轮教训）：`trace()` 打的是本机真实路径，测试一旦跑到失败分支，就会把假 transport 的 `createCard is not a function`、假投影的 `no projections` 写进生产日志——一次对标审计据此报了 338 条"线上 bug"。现在 `VITEST` 下静默（`FEISHU_CARD_TRACE=1` 可开）。**排查第一步永远是看 `sessionKey`**：`oc_dm` 之类是 fixture，真实群是 `oc_<32hex>`。
 15.15 **单卡有预算，长答案要续卡**（第 28 轮）：`ANSWER_MAX_BYTES`（≈13KB markdown）之外不能只截断。`splitAnswer()` 按字节切、**优先段落边界**、上限 4 段；主卡显示第 1 段 +「已续到下一张卡片」，其余 seal 后作为**静态卡**发出（fire-and-forget，失败不影响封卡）。
 15.16 **面板（工具列表）是写链上最大的负担**（第 28 轮实测：72% 的 flush 不推进正文、中位间隔 913ms）：面板刷新周期 2s，最多 24 行，**只有最新 5 行带参数预览**（错误行永远保留）。面板和正文仍必须同一个 `batchUpdate`（同一张卡 sequence 单调，真并行必撞 300317）。
+15.17 **面板可以关，但「不存在的元素」不能 patch**（第 29 轮）：`showPanel=false` 时初始卡不创建 panel，所以 flush 不发改动、**seal 计划也不能带 panel 动作**（`buildSealPlan({panelContent: undefined})` 会跳过）。patch 一个不存在的 `element_id` 会让整批 `batchUpdate` 回滚——答案会一起丢。
+15.18 **「思考中」要读秒**（第 29 轮用户要求：确保不是 bug 卡住了）：loading 行每秒改成 `思考中 12s`，只更新这一个元素；**只要正文待写或正在封卡就跳过这一秒**，别跟打字机抢同一条串行写链。封卡/撤回时停表。
+15.19 **表情要按结局区分**（第 29 轮）：✅ 只给真的答出来的回合；**中断（/stop、卡内按钮、超时）用 `THINKING`（🤔）**，没产出才撤表情。飞书 emoji key 实测有效集合：`DONE`/`OnIt`/`THINKING`/`Shrug`/`GLANCE`；`Thinking`/`Confused`/`Question`/`Surprised` 一律 `231001 reaction type is invalid`。
 16. **`agent/assistant-stream` 的 `end` 是每次 LLM 尝试的结束，不是一轮的结束**；一轮的边界是持久化的 `session/event` → `turn/end`。
 17. **一个应用只能有一条长连接**：起第二个实例会偷事件，表现为"插件时好时坏"。本地调试前先杀掉其他 `DeepSeek Harness` 进程。
 18. **open_id 按应用隔离**，同一个人不同应用下不一样。

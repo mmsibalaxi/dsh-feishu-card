@@ -7,6 +7,15 @@
 export declare const ACK_EMOJI = "OnIt";
 /** The completed state: "received AND answered". */
 export declare const DONE_EMOJI = "DONE";
+/**
+ * The interrupted state (user feedback 2026-11-11).
+ *
+ * A stopped turn must not claim ✅ — nothing was answered. `THINKING` renders as
+ * the puzzled "hmm?" face, which reads as "this one stopped mid-thought". Verified
+ * accepted by Feishu's reaction API; other candidates (`Shrug`, `GLANCE`) also
+ * work if this one ever looks wrong.
+ */
+export declare const INTERRUPTED_EMOJI = "THINKING";
 export interface ReactionOptions {
     appId: string;
     appSecret: string;
@@ -40,9 +49,13 @@ export declare class FeishuReactor {
     /**
      * Turn the receipt into its final state (✅ by default) once the answer is out.
      *
-     * Adds the new emoji BEFORE removing the old one, so the message never sits
-     * with no reaction for a moment. A message we never acked still gets the final
-     * emoji — the create may simply have failed earlier.
+     * The OLD emoji is removed BEFORE the new one is added (user preference
+     * 2026-11-11): the two states must never coexist, not even for the fraction of
+     * a second an add-first order leaves them together. A message we never acked
+     * still gets the final emoji — the earlier create may simply have failed.
+     *
+     * If adding the new one fails, the previous receipt is put back best-effort so
+     * the message is not left with no reaction at all.
      *
      * @param messageId - the message that was answered
      * @param emojiType - final Feishu emoji key

@@ -45,6 +45,8 @@ function makeCard(over: Partial<StreamingCardOptions> = {}) {
     chatId: 'oc_g1',
     footerFields: FOOTER_FIELDS,
     flushIntervalMs: 0,
+    // Deterministic batching: each test opts into the 1s "思考中 Ns" counter.
+    elapsedTick: false,
     ...over,
   })
   return { card, fake }
@@ -617,9 +619,33 @@ describe('StreamingCard', () => {
     expect(fake.settings).toHaveLength(1)
   })
 
-  it('stays quiet while waiting (the loading icon animates client-side), then deletes it on seal', async () => {
-    // The indicator is a Feishu-hosted animated icon, so waiting costs nothing:
-    // no dots ticker, no card write, no sequence to race the answer flush.
+  it('can drop the process panel entirely (工具栏可关)', async () => {
+    // 2026-11-11: 支持关闭工具栏显示 — a card whose only state is the answer,
+    // the waiting row and the stop button.
+    const { card, fake } = makeCard({ showPanel: false, sessionKey: 'oc_g1' } as never)
+    await card.start()
+    const ids = createdIds(fake)
+    expect(ids).not.toContain('agent_process_panel')
+    expect(ids).toEqual(['answer_content', 'loading_icon', 'stop_row'])
+
+    // A tool step must not try to patch a panel that does not exist: that batch
+    // would fail and take the answer down with it.
+    card.toolStart('c1', 'web_search', 1000)
+    card.pushAnswer('答案')
+    await card.flush()
+    const actions = (fake.batches.at(-1)?.actions ?? []) as Action[]
+    expect(actions.map(idOf)).toEqual(['answer_content'])
+
+    await card.seal({ status: '已完成' })
+    const sealed = fake.batches.flatMap((batch) => batch.actions as Action[])
+    expect(sealed.some((action) => idOf(action) === 'agent_process_panel')).toBe(false)
+    expect(lastFooter(fake)).toContain('已完成')
+  })
+
+  it('counts the waiting seconds, then deletes the row on seal', async () => {
+    // 2026-11-11 feedback: 思考中要做读秒, 确保不是 bug 卡住了. The loading row shows
+    // a live second counter; the only writes while waiting are those ticks (the
+    // animated icon itself costs nothing).
     vi.useFakeTimers()
     try {
       const fake = fakeTransport()
@@ -631,14 +657,23 @@ describe('StreamingCard', () => {
       })
       await card.start()
       await vi.advanceTimersByTimeAsync(2500)
-      expect(fake.batches).toHaveLength(0)
+      // One tick per second, each touching ONLY the loading row.
+      expect(fake.batches).toHaveLength(2)
+      for (const batch of fake.batches) {
+        expect(batch.actions as Action[]).toHaveLength(1)
+        expect(idOf((batch.actions as Action[])[0])).toBe('loading_icon')
+        expect(textOf((batch.actions as Action[])[0])).toContain('思考中')
+      }
 
       card.pushAnswer('北京今天晴')
       await vi.advanceTimersByTimeAsync(2000)
-      expect(fake.batches).toHaveLength(1)
-      const flush = fake.batches[0].actions as Action[]
-      expect(flush.map(idOf)).toEqual(['answer_content'])
-      expect(textOf(flush[0])).toContain('北京今天晴')
+      const answerBatch = fake.batches.find((batch) =>
+        (batch.actions as Action[]).some((action) => idOf(action) === 'answer_content'),
+      )
+      expect(answerBatch).toBeDefined()
+      const answerActions = answerBatch?.actions as Action[]
+      expect(answerActions.map(idOf)).toEqual(['answer_content'])
+      expect(textOf(answerActions[0])).toContain('北京今天晴')
       expect(lastFooter(fake)).toBeUndefined()
 
       // Sealing removes the loading icon (and nothing else, without a session).
@@ -647,6 +682,11 @@ describe('StreamingCard', () => {
         .flatMap((batch) => batch.actions as Action[])
         .filter((action) => action.action === 'delete_elements')
       expect(deletes.map((action) => action.params.element_ids)).toEqual([['loading_icon']])
+
+      // …and the ticking stops: no writes after the seal.
+      const afterSeal = fake.batches.length
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(fake.batches).toHaveLength(afterSeal)
     } finally {
       vi.useRealTimers()
     }

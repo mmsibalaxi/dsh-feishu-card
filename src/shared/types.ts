@@ -65,6 +65,12 @@ export interface FeishuCardConfig {
   showPanel: boolean
   /** Keep the process panel expanded after the turn seals. */
   panelExpanded: boolean
+  /**
+   * Mask credentials, internal IPs and personal contact data in anything the
+   * bridge posts to a **group** chat. DMs are left alone: the person reading has
+   * the machine the secret came from.
+   */
+  redactSecrets: boolean
 }
 
 export const CONFIG_DEFAULTS: Omit<FeishuCardConfig, 'appId' | 'appSecret'> = {
@@ -95,6 +101,10 @@ export const CONFIG_DEFAULTS: Omit<FeishuCardConfig, 'appId' | 'appSecret'> = {
   // Turn it off for a clean card whose only visible state is the answer.
   showPanel: true,
   panelExpanded: false,
+  // On by default: a group card is archived and searchable, and tool output
+  // routinely carries a key. The cost of a false positive is a masked word; the
+  // cost of a false negative is a rotated credential and an incident ticket.
+  redactSecrets: true,
 }
 
 /**

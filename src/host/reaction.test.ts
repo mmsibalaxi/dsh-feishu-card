@@ -76,16 +76,16 @@ describe('FeishuReactor.ack', () => {
 })
 
 describe('FeishuReactor.settle', () => {
-  it('replaces the receipt with DONE, adding the new one first', async () => {
-    // The order matters: a delete-then-add would leave the message with no
-    // reaction for a moment, which reads as "the bot took it back".
+  it('removes the old receipt BEFORE adding the new one', async () => {
+    // User preference 2026-11-11: the two states must never coexist, not even
+    // for the instant an add-first order leaves them side by side.
     const { reactor, calls } = makeReactor()
     await reactor.ack('om_1')
     await expect(reactor.settle('om_1')).resolves.toBe(true)
     expect(calls.map((call) => `${call.kind}:${call.value}`)).toEqual([
       'add:OnIt',
-      'add:DONE',
       'remove:re_1',
+      'add:DONE',
     ])
     expect(reactor.placedEmoji('om_1')).toBe(DONE_EMOJI)
   })
@@ -116,20 +116,27 @@ describe('FeishuReactor.settle', () => {
     expect(calls).toEqual([{ kind: 'add', messageId: 'om_1', value: 'DONE' }])
   })
 
-  it('keeps the stale receipt when the final emoji cannot be added', async () => {
-    let adds = 0
+  it('puts the old receipt back when the final emoji cannot be added', async () => {
+    // Remove-first means a failed add leaves the message bare, so the previous
+    // receipt is restored best-effort.
+    let failedDone = false
     const { reactor, calls } = makeReactor({
       create: async (messageId, emoji) => {
-        adds += 1
-        if (adds > 1) throw new Error('rate limited')
+        if (emoji === DONE_EMOJI && !failedDone) {
+          failedDone = true
+          throw new Error('rate limited')
+        }
         calls.push({ kind: 'add', messageId, value: emoji })
-        return { data: { reaction_id: 're_1' } }
+        return { data: { reaction_id: emoji === ACK_EMOJI ? 're_1' : 're_2' } }
       },
     })
     await reactor.ack('om_1')
     await expect(reactor.settle('om_1')).resolves.toBe(false)
-    // Nothing was removed: an "on it" beats no receipt at all.
-    expect(calls.map((call) => call.kind)).toEqual(['add'])
+    expect(calls.map((call) => `${call.kind}:${call.value}`)).toEqual([
+      'add:OnIt',
+      'remove:re_1',
+      'add:OnIt',
+    ])
     expect(reactor.placedEmoji('om_1')).toBe(ACK_EMOJI)
   })
 })

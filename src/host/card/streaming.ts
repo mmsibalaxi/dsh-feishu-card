@@ -61,6 +61,13 @@ export interface StreamingCardOptions {
    * (2026-11-11).
    */
   showPanel?: boolean
+  /**
+   * Tick the "思考中 12s" counter once a second (default true).
+   *
+   * Off only for tests that need a deterministic write sequence; a user watching
+   * a long turn explicitly asked for the second counter (2026-11-11).
+   */
+  elapsedTick?: boolean
   /** Live footer readings; called on create and on every flush. */
   footerSource?: () => FooterInput
   /** Model shown in the panel's collapsed header. */
@@ -92,6 +99,25 @@ export interface StreamingCardOptions {
    * Best effort: a failure must never cost the answer.
    */
   resolveImages?: (text: string) => Promise<string>
+  /**
+   * Replaces links to local files with a plain attachment hint before the card
+   * seals.
+   *
+   * A card renders text only: leaving `[报告](C:\out\report.csv)` in the body
+   * shows the user a path they can neither click nor open. The file itself is
+   * sent as a separate `file` message by the runtime; this keeps the card body
+   * honest about that.
+   */
+  stripFileLinks?: (text: string) => string
+  /**
+   * Masks secrets in everything this card renders.
+   *
+   * Applied at the render sinks rather than once at seal, because the card is
+   * live: a token that streams into the card at second 3 is visible (and
+   * archived) for the whole turn even if the sealed body is clean. The runtime
+   * decides when to arm it — by default only for group chats.
+   */
+  redact?: (text: string) => string
   /**
    * Delays before each seal attempt (first entry is "now").
    *
@@ -134,6 +160,8 @@ export class StreamingCard {
   private closed = false
   /** The seal plan was applied; the card can never change again. */
   private sealed = false
+  /** 1s ticker for the visible "how long has it been thinking" counter. */
+  private ticker?: ReturnType<typeof setTimeout>
   /** In-flight seal, shared by every concurrent caller. */
   private sealing?: Promise<SealReport | undefined>
   /** Status requested before the card existed; applied by start(). */
@@ -194,8 +222,25 @@ export class StreamingCard {
   /** What the live card's answer element holds right now. */
   private answerForCard(): string {
     const parts = this.answerParts()
-    const head = sanitizeAnswer(parts[0] ?? '')
+    const head = sanitizeAnswer(this.visible(parts[0] ?? ''))
     return parts.length > 1 ? `${head}${MORE_FOLLOWS_SUFFIX}` : head
+  }
+
+  /**
+   * Every string that leaves for Feishu goes through here.
+   *
+   * One sink keeps the rule simple: a card is only ever as safe as its most
+   * careless element, and tool rows carry the command line that leaked.
+   */
+  private visible(text: string): string {
+    if (!this.options.redact || !text) return text
+    try {
+      return this.options.redact(text)
+    } catch {
+      // A masking failure must never cost the answer: show it unmasked and let
+      // the caller's own logging be the alarm.
+      return text
+    }
   }
 
   /**
@@ -207,7 +252,7 @@ export class StreamingCard {
    */
   private async sendContinuations(parts: string[]): Promise<void> {
     for (const [index, part] of parts.entries()) {
-      const content = sanitizeAnswer(part)
+      const content = sanitizeAnswer(this.visible(part))
       if (!content.trim()) continue
       try {
         await this.options.transport.createCard(
@@ -234,6 +279,58 @@ export class StreamingCard {
   /** Milliseconds since the card was created. */
   private elapsedMs(): number {
     return (this.options.now ?? Date.now)() - this.startedAt
+  }
+
+  /**
+   * Tick the "thinking" row once a second.
+   *
+   * A static loading icon proves nothing: a user watching a 4-minute turn cannot
+   * tell "the model is thinking" from "the card is stuck" (2026-11-11 feedback:
+   * 读秒, 确保不是 bug 卡住了). One character-sized update per second is cheap,
+   * and it is skipped whenever an answer flush is pending so the typewriter
+   * always wins the serialized write chain.
+   */
+  private scheduleTick(): void {
+    if (this.closed || this.sealed) return
+    if (this.options.elapsedTick === false) return
+    this.ticker = setTimeout(() => {
+      this.ticker = undefined
+      void this.write(() => this.tick()).catch(() => undefined)
+      this.scheduleTick()
+    }, 1000)
+    ;(this.ticker as { unref?: () => void }).unref?.()
+  }
+
+  /** One second of the counter. Never lets a failure escape. */
+  private async tick(): Promise<void> {
+    if (!this.cardId || this.closed || this.sealed) return
+    if (this.dirty || this.sealing) return
+    this.sequence += 1
+    try {
+      await this.options.transport.batchUpdate(
+        this.cardId,
+        [
+          {
+            action: 'partial_update_element',
+            params: {
+              element_id: LOADING_ICON_ID,
+              partial_element: { content: `思考中 ${formatElapsed(this.elapsedMs())}` },
+            },
+          },
+        ],
+        this.sequence,
+      )
+      trace('card-tick', { cardId: this.cardId, elapsedMs: this.elapsedMs() })
+    } catch (error) {
+      // Purely cosmetic: the next tick comes in a second anyway.
+      trace('card-tick-failed', { cardId: this.cardId, error: String(error).slice(0, 120) })
+    }
+  }
+
+  private stopTicker(): void {
+    if (!this.ticker) return
+    clearTimeout(this.ticker)
+    this.ticker = undefined
   }
 
   /** Create the card. Safe to call once; later calls are no-ops. */
@@ -265,6 +362,8 @@ export class StreamingCard {
     this.options.log?.(`streaming card created ${this.cardId}`)
     this.options.onCardId?.(this.cardId)
     trace('card-create', { chatId: this.options.chatId, cardId: this.cardId })
+    // A visible second counter so "thinking" never looks like "stuck".
+    this.scheduleTick()
     // Text can arrive before the card exists (the model is often faster than
     // two round trips to Feishu). Marking dirty before start() is what makes
     // those deltas land instead of vanishing.
@@ -349,13 +448,16 @@ export class StreamingCard {
    */
   toolStart(id: string, name: string, at: number, preview?: string): void {
     if (this.closed || !name) return
+    // The preview is usually the literal command line — the single most likely
+    // place for a token to reach a group.
+    const safe = preview === undefined ? undefined : this.visible(preview)
     const existing = this.stepIndex.get(id)
     if (existing !== undefined) {
       const step = this.steps[existing]
-      if (step) step.preview = preview ?? step.preview
+      if (step) step.preview = safe ?? step.preview
       return
     }
-    this.steps.push({ id, name, ms: undefined, preview })
+    this.steps.push({ id, name, ms: undefined, preview: safe })
     this.stepIndex.set(id, this.steps.length - 1)
     this.toolStartedAt.set(id, at)
     this.markPanelDirty()
@@ -370,7 +472,7 @@ export class StreamingCard {
     const close = (target: PanelToolStep) => {
       target.ms = Math.max(0, at - (startedAt ?? at))
       target.completed = ok
-      if (!ok && error) target.error = error
+      if (!ok && error) target.error = this.visible(error)
       this.markPanelDirty()
     }
     if (!step || step.ms !== undefined) {
@@ -613,10 +715,11 @@ export class StreamingCard {
   private async runSeal(input: { status: string; elapsed?: string }): Promise<SealReport | undefined> {
     const cardId = this.cardId
     if (!cardId) return undefined
-    // Cancel the pending timer first, then write whatever is dirty: flush()
-    // refuses to run once content is frozen, so that flag flips only afterwards.
+    // Cancel the pending timers first (the panel clock and the second counter):
+    // flush() refuses to run once content is frozen, so flags flip afterwards.
     if (this.timer) clearTimeout(this.timer)
     this.timer = undefined
+    this.stopTicker()
     // Images last: the answer is final by now, so the upload happens once and
     // the flushed text is the one the user keeps.
     if (this.options.resolveImages && this.answer.includes('![')) {
@@ -630,6 +733,19 @@ export class StreamingCard {
         }
       } catch (error) {
         this.options.log?.(`image resolve failed: ${error}`)
+      }
+    }
+    // File links go in the same pass: the answer is final, so the same set of
+    // references the runtime is about to upload is the set removed here.
+    if (this.options.stripFileLinks) {
+      try {
+        const stripped = this.options.stripFileLinks(this.answer)
+        if (stripped !== this.answer) {
+          this.setAnswerText(stripped)
+          this.answerDirty = true
+        }
+      } catch (error) {
+        this.options.log?.(`file link strip failed: ${error}`)
       }
     }
     if (this.dirty) {
@@ -674,7 +790,7 @@ export class StreamingCard {
       footer,
       // The chat-list / notification preview carries the answer, not the status
       // word — a conversation list full of 已完成 says nothing about the reply.
-      summary: summaryFromAnswer(this.answer, footer.status),
+      summary: summaryFromAnswer(this.visible(this.answer), footer.status),
       // The loading icon is only a "still working" hint: it goes away on seal,
       // and so does the stop button — a sealed turn has nothing left to stop.
       removeElementIds: this.options.sessionKey
@@ -727,6 +843,7 @@ export class StreamingCard {
     // it "sealed" so no retry loop keeps hammering a message that is gone.
     this.closed = true
     this.sealed = true
+    this.stopTicker()
     if (this.timer) clearTimeout(this.timer)
     this.timer = undefined
     trace('card-unavailable', { cardId: this.cardId, reason })

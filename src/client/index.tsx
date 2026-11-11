@@ -1330,7 +1330,24 @@ function SettingsPage({
         </Field>
       </Section>
 
+      <Section title="群聊安全">
+        <ToggleRow
+          label="群聊里给敏感信息打码"
+          hint="密钥、内网 IP、手机号、邮箱在群卡片里显示成「⟨已打码·API Key⟩」。工具输出经常带凭据，而群卡片会被存档和搜索。私聊不打码"
+          checked={draft.redactSecrets}
+          disabled={disabled}
+          onChange={(next) => set('redactSecrets', next)}
+        />
+      </Section>
+
       <Section title="过程面板">
+        <ToggleRow
+          label="显示过程面板（工具栏）"
+          hint="卡片上那条可折叠的「💠 模型 · 🫧 轮数 · ✨ 工具 · 🎶 耗时」。关闭后卡片只显示正文、状态行和停止按钮"
+          checked={draft.showPanel}
+          disabled={disabled}
+          onChange={(next) => set('showPanel', next)}
+        />
         <ToggleRow
           label="显示模型的思考过程"
           hint="打开后卡片里会出现「🧠 …」，长回合能看到它在想什么；会多刷几次卡片"

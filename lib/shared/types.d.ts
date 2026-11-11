@@ -56,8 +56,16 @@ export interface FeishuCardConfig {
     turnTimeoutMs: number;
     /** Render the model's reasoning stream in the card's process panel. */
     showReasoning: boolean;
+    /** Show the collapsible process panel (tools/rounds/elapsed) on the card. */
+    showPanel: boolean;
     /** Keep the process panel expanded after the turn seals. */
     panelExpanded: boolean;
+    /**
+     * Mask credentials, internal IPs and personal contact data in anything the
+     * bridge posts to a **group** chat. DMs are left alone: the person reading has
+     * the machine the secret came from.
+     */
+    redactSecrets: boolean;
 }
 export declare const CONFIG_DEFAULTS: Omit<FeishuCardConfig, 'appId' | 'appSecret'>;
 /**

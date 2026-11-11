@@ -278,6 +278,13 @@ export interface TurnState {
    * somebody else's long-running answer is a surprise, not a feature.
    */
   ownerOpenId?: string
+  /**
+   * Whether this turn is answering a group or a direct chat.
+   *
+   * Carried into the card so the runtime can arm secret masking for groups
+   * only: a group card is archived and read by people who never ran the tool.
+   */
+  chatType?: 'p2p' | 'group'
 }
 
 export interface BridgeOptions {
@@ -319,6 +326,18 @@ export interface BridgeOptions {
   ask?: {
     bind(sessionId: string, chatId: string): void
     registerTool(agentCtx: Context): void
+  }
+  /**
+   * Feishu-side approval prompts.
+   *
+   * Same binding contract as `ask`, for the same reason: the `approval/request`
+   * listener is installed in `setup` (before the first prompt assembly) but the
+   * chat it belongs to only exists once the session does. Without it a turn
+   * driven from Feishu stalls on the desktop GUI's permission dialog.
+   */
+  approvals?: {
+    bind(sessionId: string, chatId: string): void
+    register(agentCtx: Context): void
   }
   /** Hard cap on one turn; the agent is cancelled when it expires. */
   turnTimeoutMs?: number
@@ -540,6 +559,9 @@ export class FeishuBridge {
         })
       }
       this.options.ask?.registerTool?.(agentCtx)
+      // Prepended inside this agent's scope, so an approval asked by THIS turn
+      // becomes a card instead of a dialog on a machine nobody is watching.
+      this.options.approvals?.register(agentCtx)
       trace('agent-setup-done', { sessionKey })
     }
 
@@ -573,6 +595,9 @@ export class FeishuBridge {
     // The asker needs session → chat to deliver a question; bind before the
     // first turn so a tool call can never arrive homeless.
     this.options.ask?.bind(handle.agent.id, chatId)
+    // Same hop for approvals: `approval/request` names the agent, and the card
+    // has to be posted into that agent's chat.
+    this.options.approvals?.bind(handle.agent.id, chatId)
     // Own the session in the workspace registry, or the GUI files it under an
     // untitled group and cannot open its history.
     if (workspace) {
@@ -627,6 +652,7 @@ export class FeishuBridge {
       rounds: 0,
       sessionKey: request.sessionKey,
       ...(request.senderOpenId ? { ownerOpenId: request.senderOpenId } : {}),
+      ...(request.chatType ? { chatType: request.chatType } : {}),
     }
     // The card is posted as a reply to the message that triggered the turn, so
     // Feishu renders the "回复 XXX" quote header. `undefined` means this turn

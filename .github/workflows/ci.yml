@@ -1,0 +1,74 @@
+name: CI
+
+# Two things this repository must never do again:
+#   1. ship a real credential or a real Feishu identifier (the first public push
+#      still carried a live app id in a doc and a person's name in LICENSE), and
+#   2. ship a `lib/` that no longer matches `src/` — the plugin is installed from
+#      git and runs the committed bundle, so a stale build is a silent behaviour
+#      change for every user.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The plugin targets the Node version DSH itself requires (package.json
+  # `engines.node`). Pinning it here keeps CI from drifting ahead of the host.
+  NODE_VERSION: '22'
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: No credentials or real Feishu ids
+        # Scans src/, scripts/, docs and the profile patch. Exits 1 on a real
+        # app id / open id / chat id / secret literal / personal home path.
+        run: npm run check-secrets
+
+      - name: No credentials in the committed build output
+        # `check-secrets` skips lib/ (it is generated), but lib/ is what ships.
+        # A source-map embeds the whole source tree, so a leak there is just as
+        # public as one in src/.
+        run: |
+          if grep -rInE 'cli_[a-z0-9]{16}|ou_[a-f0-9]{32}|oc_[a-f0-9]{32}|meicai\.cn|sprucetec' \
+               --include='*.js' --include='*.map' --include='*.d.ts' lib \
+             | grep -vE '0{8,}|x{8,}|y{8,}|abc123|def456'; then
+            echo '::error::lib/ contains a real identifier or an internal domain'
+            exit 1
+          fi
+          echo 'lib/ is clean'
+
+      - name: Type check
+        run: npm run check
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Committed lib/ is up to date
+        # A dirty tree here means src/ changed without a rebuild. Fails the run
+        # instead of leaving users on a bundle that does not match the source.
+        run: |
+          if ! git diff --quiet -- lib; then
+            echo '::error::lib/ is stale — run `npm run build` and commit the result'
+            git diff --stat -- lib
+            exit 1
+          fi
+          echo 'lib/ matches src/'

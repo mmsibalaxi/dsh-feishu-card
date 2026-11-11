@@ -29,6 +29,16 @@ export const ACK_EMOJI = 'OnIt'
 /** The completed state: "received AND answered". */
 export const DONE_EMOJI = 'DONE'
 
+/**
+ * The interrupted state (user feedback 2026-11-11).
+ *
+ * A stopped turn must not claim ✅ — nothing was answered. `THINKING` renders as
+ * the puzzled "hmm?" face, which reads as "this one stopped mid-thought". Verified
+ * accepted by Feishu's reaction API; other candidates (`Shrug`, `GLANCE`) also
+ * work if this one ever looks wrong.
+ */
+export const INTERRUPTED_EMOJI = 'THINKING'
+
 export interface ReactionOptions {
   appId: string
   appSecret: string
@@ -119,9 +129,13 @@ export class FeishuReactor {
   /**
    * Turn the receipt into its final state (✅ by default) once the answer is out.
    *
-   * Adds the new emoji BEFORE removing the old one, so the message never sits
-   * with no reaction for a moment. A message we never acked still gets the final
-   * emoji — the create may simply have failed earlier.
+   * The OLD emoji is removed BEFORE the new one is added (user preference
+   * 2026-11-11): the two states must never coexist, not even for the fraction of
+   * a second an add-first order leaves them together. A message we never acked
+   * still gets the final emoji — the earlier create may simply have failed.
+   *
+   * If adding the new one fails, the previous receipt is put back best-effort so
+   * the message is not left with no reaction at all.
    *
    * @param messageId - the message that was answered
    * @param emojiType - final Feishu emoji key
@@ -131,16 +145,29 @@ export class FeishuReactor {
     if (!messageId) return false
     const previous = this.placed.get(messageId)
     if (previous?.emoji === emojiType) return true
+    if (previous?.reactionId) await this.drop(messageId, previous.reactionId)
+    // Whatever it carried before is gone now (or never existed).
+    this.placed.delete(messageId)
     try {
       const reactionId = await this.add(messageId, emojiType)
       this.remember(messageId, { emoji: emojiType, ...(reactionId ? { reactionId } : {}) })
+      return true
     } catch (error) {
       this.options.logger?.warn(`feishu-card: final reaction ${emojiType} on ${messageId} failed: ${error}`)
-      // Keep whatever is already there: a stale "on it" beats no receipt at all.
+      if (previous) {
+        // Best effort: the old receipt beats nothing at all.
+        try {
+          const reactionId = await this.add(messageId, previous.emoji)
+          this.remember(messageId, {
+            emoji: previous.emoji,
+            ...(reactionId ? { reactionId } : {}),
+          })
+        } catch {
+          // Stay bare — the next turn will react again.
+        }
+      }
       return false
     }
-    if (previous?.reactionId) await this.drop(messageId, previous.reactionId)
-    return true
   }
 
   /**

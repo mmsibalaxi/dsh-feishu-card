@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   BRIDGE_COMMANDS,
   formatAllowlist,
+  formatApprovals,
+  formatApprovalsCleared,
   formatHelp,
   formatModel,
   formatReset,
@@ -41,7 +43,7 @@ describe('parseInput', () => {
   })
 
   it('exports the command list for /help', () => {
-    expect(BRIDGE_COMMANDS).toEqual(['status', 'new', 'stop', 'help', 'model'])
+    expect(BRIDGE_COMMANDS).toEqual(['status', 'new', 'stop', 'help', 'model', 'approvals'])
   })
 })
 
@@ -97,6 +99,39 @@ describe('other formatters', () => {
   it('allowlist rendering', () => {
     expect(formatAllowlist(['ou_a', 'ou_b'])).toBe('ou_a\nou_b')
     expect(formatAllowlist([])).toBe('（空）')
+  })
+
+  describe('formatApprovals', () => {
+    const now = 1_000_000
+    const grants = [
+      { chatId: 'oc_a', tool: 'shell', expiresAt: now + 3_600_000 },
+      { chatId: 'oc_b', tool: 'write', expiresAt: now + 7_200_000 },
+    ]
+
+    it('says so when nothing is remembered', () => {
+      expect(formatApprovals([], now)).toContain('没有被记住的授权')
+    })
+
+    it('only shows the current chat when one is given', () => {
+      const text = formatApprovals(grants, now, 'oc_a')
+      expect(text).toContain('shell')
+      // Another group's standing grant is not this group's business.
+      expect(text).not.toContain('write')
+    })
+
+    it('reports the remaining hours', () => {
+      expect(formatApprovals(grants, now)).toContain('1 小时后过期')
+      expect(formatApprovals(grants, now)).toContain('2 小时后过期')
+    })
+
+    it('always points at the revoke command', () => {
+      expect(formatApprovals(grants, now)).toContain('/approvals clear')
+    })
+
+    it('confirms a revoke honestly, including "nothing to revoke"', () => {
+      expect(formatApprovalsCleared(2)).toContain('已撤销 2 条')
+      expect(formatApprovalsCleared(0)).toContain('本来就没有')
+    })
   })
 })
 

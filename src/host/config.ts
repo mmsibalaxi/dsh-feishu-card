@@ -119,6 +119,12 @@ export const Config = Schema.object({
     .default(CONFIG_DEFAULTS.panelExpanded)
     .description('回合结束后保持思考面板展开')
     .volatile(),
+  redactSecrets: Schema.boolean()
+    .default(CONFIG_DEFAULTS.redactSecrets)
+    .description(
+      '群聊里给密钥 / 内网 IP / 手机号 / 邮箱打码（私聊不打码）。工具输出经常带凭据，群卡片会被存档和搜索',
+    )
+    .volatile(),
 })
 
 /** The resolved config type the host half reads. */
@@ -172,6 +178,7 @@ export function readConfig(raw: RawConfig | undefined): ResolvedConfig {
     showReasoning: plain(source.showReasoning, CONFIG_DEFAULTS.showReasoning),
     showPanel: plain(source.showPanel, CONFIG_DEFAULTS.showPanel),
     panelExpanded: plain(source.panelExpanded, CONFIG_DEFAULTS.panelExpanded),
+    redactSecrets: plain(source.redactSecrets, CONFIG_DEFAULTS.redactSecrets),
   }
 }
 

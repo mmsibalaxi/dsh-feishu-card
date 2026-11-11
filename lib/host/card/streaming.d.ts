@@ -28,6 +28,21 @@ export interface StreamingCardOptions {
     /** Keep the process panel expanded once the turn seals. */
     panelExpanded?: boolean;
     panelExpandedWhileRunning?: boolean;
+    /**
+     * Render the collapsible process panel at all (tools/rounds/elapsed).
+     *
+     * `false` produces a card whose only state is the answer, the "still working"
+     * row and the stop button — the config lets a user turn the toolbar off
+     * (2026-11-11).
+     */
+    showPanel?: boolean;
+    /**
+     * Tick the "思考中 12s" counter once a second (default true).
+     *
+     * Off only for tests that need a deterministic write sequence; a user watching
+     * a long turn explicitly asked for the second counter (2026-11-11).
+     */
+    elapsedTick?: boolean;
     /** Live footer readings; called on create and on every flush. */
     footerSource?: () => FooterInput;
     /** Model shown in the panel's collapsed header. */
@@ -59,6 +74,25 @@ export interface StreamingCardOptions {
      * Best effort: a failure must never cost the answer.
      */
     resolveImages?: (text: string) => Promise<string>;
+    /**
+     * Replaces links to local files with a plain attachment hint before the card
+     * seals.
+     *
+     * A card renders text only: leaving `[报告](C:\out\report.csv)` in the body
+     * shows the user a path they can neither click nor open. The file itself is
+     * sent as a separate `file` message by the runtime; this keeps the card body
+     * honest about that.
+     */
+    stripFileLinks?: (text: string) => string;
+    /**
+     * Masks secrets in everything this card renders.
+     *
+     * Applied at the render sinks rather than once at seal, because the card is
+     * live: a token that streams into the card at second 3 is visible (and
+     * archived) for the whole turn even if the sealed body is clean. The runtime
+     * decides when to arm it — by default only for group chats.
+     */
+    redact?: (text: string) => string;
     /**
      * Delays before each seal attempt (first entry is "now").
      *
@@ -101,6 +135,8 @@ export declare class StreamingCard {
     private closed;
     /** The seal plan was applied; the card can never change again. */
     private sealed;
+    /** 1s ticker for the visible "how long has it been thinking" counter. */
+    private ticker?;
     /** In-flight seal, shared by every concurrent caller. */
     private sealing?;
     /** Status requested before the card existed; applied by start(). */
@@ -144,6 +180,13 @@ export declare class StreamingCard {
     /** What the live card's answer element holds right now. */
     private answerForCard;
     /**
+     * Every string that leaves for Feishu goes through here.
+     *
+     * One sink keeps the rule simple: a card is only ever as safe as its most
+     * careless element, and tool rows carry the command line that leaked.
+     */
+    private visible;
+    /**
      * Post the remainder of a long answer as static cards.
      *
      * Not awaited: these are separate messages, not part of the seal, and a turn
@@ -154,6 +197,19 @@ export declare class StreamingCard {
     private get dirty();
     /** Milliseconds since the card was created. */
     private elapsedMs;
+    /**
+     * Tick the "thinking" row once a second.
+     *
+     * A static loading icon proves nothing: a user watching a 4-minute turn cannot
+     * tell "the model is thinking" from "the card is stuck" (2026-11-11 feedback:
+     * 读秒, 确保不是 bug 卡住了). One character-sized update per second is cheap,
+     * and it is skipped whenever an answer flush is pending so the typewriter
+     * always wins the serialized write chain.
+     */
+    private scheduleTick;
+    /** One second of the counter. Never lets a failure escape. */
+    private tick;
+    private stopTicker;
     /** Create the card. Safe to call once; later calls are no-ops. */
     start(): Promise<void>;
     /**

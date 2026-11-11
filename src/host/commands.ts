@@ -7,7 +7,7 @@
  */
 import { formatIdList } from '../shared/types.js'
 
-export const BRIDGE_COMMANDS = ['status', 'new', 'stop', 'help', 'model'] as const
+export const BRIDGE_COMMANDS = ['status', 'new', 'stop', 'help', 'model', 'approvals'] as const
 export type BridgeCommand = (typeof BRIDGE_COMMANDS)[number]
 
 export interface ParsedInput {
@@ -68,6 +68,7 @@ export function formatHelp(): string {
     '/model — 查看当前模型；/model <provider/model> 切换本会话所用模型',
     '/new — 结束当前会话，下一条消息开新会话',
     '/stop — 停止当前正在跑的任务',
+    '/approvals — 查看「本群总是允许」记住的工具；/approvals clear 全部撤销',
     '/help — 显示本帮助',
     '',
     '其它 / 开头的内容会交给 Harness 自己处理（如 /compact、/goal）。',
@@ -113,4 +114,37 @@ export function formatStop(done: boolean): string {
 /** Renders an allowlist for diagnostics. */
 export function formatAllowlist(ids: readonly string[]): string {
   return ids.length ? formatIdList(ids) : '（空）'
+}
+
+/**
+ * Render `/approvals`, the human-visible half of "always allow".
+ *
+ * The seam has no grant store and no revocation call, so the list a person can
+ * actually see and clear is the only thing standing between a hurried click and
+ * a standing permission nobody remembers granting.
+ */
+export function formatApprovals(
+  grants: readonly { chatId: string; tool: string; expiresAt: number }[],
+  now: number,
+  chatId?: string,
+): string {
+  const scoped = chatId ? grants.filter((grant) => grant.chatId === chatId) : grants
+  if (scoped.length === 0) {
+    return '当前没有被记住的授权。审批卡片会照常询问。'
+  }
+  const hours = (expiresAt: number): string =>
+    `${Math.max(1, Math.round((expiresAt - now) / 3_600_000))} 小时后过期`
+  return [
+    `已记住 ${scoped.length} 条「不再询问」授权：`,
+    ...scoped.map((grant) => `· ${grant.tool}（${hours(grant.expiresAt)}）`),
+    '',
+    '用 /approvals clear 全部撤销。',
+  ].join('\n')
+}
+
+/** Confirmation for `/approvals clear`. */
+export function formatApprovalsCleared(count: number): string {
+  return count > 0
+    ? `已撤销 ${count} 条「不再询问」授权，之后会重新询问。`
+    : '本来就没有被记住的授权。'
 }

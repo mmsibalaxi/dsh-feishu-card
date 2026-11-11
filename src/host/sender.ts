@@ -55,6 +55,37 @@ export class FeishuSender {
       }
     }
   }
+
+  /**
+   * Send an uploaded file as its own `file` message.
+   *
+   * A card cannot carry an attachment, so an answer's files leave as siblings of
+   * the card rather than part of it. The body is only the key: the name the user
+   * sees was stored when the file was uploaded.
+   */
+  async sendFile(
+    chatId: string,
+    fileKey: string,
+    replyToMessageId?: string,
+  ): Promise<void> {
+    const payload = { msg_type: 'file', content: JSON.stringify({ file_key: fileKey }) }
+    try {
+      if (replyToMessageId) {
+        await this.client.im.v1.message.reply({
+          path: { message_id: replyToMessageId },
+          data: payload,
+        })
+      } else {
+        await this.client.im.v1.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: { receive_id: chatId, ...payload },
+        })
+      }
+    } catch (error) {
+      this.options.logger?.warn(`feishu-card: file send failed for ${chatId}: ${error}`)
+      throw error
+    }
+  }
 }
 
 /** Feishu rejects very long text messages; split on line boundaries. */

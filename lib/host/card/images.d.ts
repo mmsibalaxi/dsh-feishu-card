@@ -3,6 +3,8 @@ export declare const MAX_IMAGES_PER_ANSWER = 3;
 export interface ImageResolverOptions {
     upload(bytes: Uint8Array, name: string): Promise<string>;
     fetchBytes?: (url: string, timeoutMs?: number) => Promise<Uint8Array>;
+    /** Read a local image; absent = local images are left untouched. */
+    readLocal?: (path: string) => Promise<Uint8Array>;
     max?: number;
     log?: (message: string) => void;
 }

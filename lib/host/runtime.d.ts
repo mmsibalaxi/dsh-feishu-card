@@ -75,6 +75,15 @@ export interface RuntimeDeps {
     /** Shared with the panel's shortcut route when supplied. */
     recent?: RecentContacts;
 }
+/** How a finished message looks in the reaction column. */
+export type TurnOutcome = 'answered' | 'stopped' | 'none';
+/**
+ * Which reaction a finished turn ends on (`undefined` = remove the receipt).
+ *
+ * 2026-11-11: a stopped turn used to end on ✅, which claims an answer that never
+ * came. `stopped` now carries the puzzled face instead.
+ */
+export declare function settleEmoji(outcome: TurnOutcome): string | undefined;
 /**
  * Whether a finished turn still needs its answer posted as a plain text message.
  *
