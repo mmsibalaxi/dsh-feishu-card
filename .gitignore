@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build output is COMMITTED on purpose: the desktop plugin installer runs no
+# prepare/postinstall script (that would need approval), so a git install must
+# already contain lib/. Do not ignore it.
+# lib/
+
+# Local state / logs
+*.log
+.DS_Store
+coverage/
+.state/
+
+# Secrets — never commit these, even though the plugin reads credentials from
+# the settings panel / environment rather than from files in the repo.
+.env
+.env.*
+*.secret.*
+*.pem
+*.key
+
+# Local live-probe scripts that may carry real ids (see scripts/env.mjs)
+scripts/local/
+
+# Internal development artefacts (chronological notes, milestone checklists,
+# local paths, real ids). They link to each other and go stale fast; the public
+# documentation is README.md + DESIGN.md + references/.
+# Delete these two lines to publish them — run `npm run check-secrets` first.
+PROGRESS.md
+PLAN.md

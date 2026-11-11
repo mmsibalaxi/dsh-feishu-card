@@ -1,0 +1,39 @@
+# dsh-feishu-card profile patch.
+#
+# The `config` block carries the schema defaults. This is not optional: cordis
+# passes `undefined` to a plugin's apply(ctx, config) when the row has no
+# config at all (resolveConfig() does not apply defaults for `undefined`), and
+# every other DSH bridge either ships defaults here (harness-lark) or reads the
+# settings document instead (dsh-im). Shipping defaults keeps a single source
+# of truth — the settings service merges panel edits into this same block, and
+# `.volatile()` fields stay live references.
+#
+# Secrets are never written here by the panel: `appSecret` is `.role('secret')`
+# and only ever travels browser → host.
+- insert:
+    - id: feishu-card
+      name: 'dsh-feishu-card'
+      config:
+        appId: ''
+        appSecret: ''
+        brand: feishu
+        dmPolicy: allowlist
+        allowlist: []
+        groupPolicy: allowlist
+        groupAllowlist: []
+        groupSenderAllowlist: []
+        requireMentionInGroups: true
+        respondToMentionAll: false
+        allowBots: none
+        sessionScope: chat
+        replyMode: streaming
+        footerFields: [status, model, context, elapsed]
+        flushIntervalMs: 200
+        provider: ''
+        model: ''
+        contextWindows: {}
+        defaultWorkspace: ''
+        dedupTtlMs: 43200000
+        turnTimeoutMs: 600000
+        showReasoning: false
+        panelExpanded: false
