@@ -67,7 +67,25 @@ export function cardText(content: string): string {
   return out.join('\n').trim()
 }
 
-/** The `msg_type` of the first item, for branching (e.g. cards need a 2nd call). */
+/** The sender fields of one `im.v1.message.get` payload. */
+export function senderOfPayload(payload: unknown): { senderOpenId?: string; senderName?: string } {
+  const items = (payload as { data?: { items?: unknown[] } } | undefined)?.data?.items
+  const item = Array.isArray(items) ? (items[0] as Record<string, unknown> | undefined) : undefined
+  const sender = item?.sender as
+    | { id?: string; sender_type?: string; sender_name?: string; open_bot_id?: string }
+    | undefined
+  if (!sender) return {}
+  const userSender = sender.sender_type === undefined || sender.sender_type === 'user'
+  const senderOpenId = userSender ? sender.id : sender.open_bot_id
+  return {
+    ...(senderOpenId ? { senderOpenId } : {}),
+    ...(sender.sender_name ? { senderName: sender.sender_name } : {}),
+  }
+}
+
+/**
+ * The `msg_type` of the first item, for branching (e.g. cards need a 2nd call).
+ */
 export function messageTypeOf(payload: unknown): string | undefined {
   const items = (payload as { data?: { items?: unknown[] } } | undefined)?.data?.items
   const item = Array.isArray(items) ? (items[0] as Record<string, unknown> | undefined) : undefined
@@ -88,14 +106,7 @@ export function parseQuotedMessage(payload: unknown): QuotedMessage | undefined 
   if (item.deleted === true) {
     return { text: '（这条消息已被撤回）' }
   }
-  const sender = item.sender as
-    | { id?: string; sender_type?: string; sender_name?: string; open_bot_id?: string }
-    | undefined
-  // For an app/bot sender, `sender.id` is the APP id (`cli_…`), not an open_id;
-  // printing it in a `姓名 (id)` label would be a lie. `open_bot_id` is the real
-  // open_id when Feishu supplies one.
-  const userSender = sender?.sender_type === undefined || sender.sender_type === 'user'
-  const senderOpenId = userSender ? sender?.id : sender?.open_bot_id
+  const { senderOpenId, senderName } = senderOfPayload(payload)
   const type = typeof item.msg_type === 'string' ? item.msg_type : 'unknown'
   const raw = (item.body as { content?: string } | undefined)?.content ?? ''
   let text = ''
@@ -131,7 +142,7 @@ export function parseQuotedMessage(payload: unknown): QuotedMessage | undefined 
   if (!text.trim()) return undefined
   return {
     ...(senderOpenId ? { senderOpenId } : {}),
-    ...(sender?.sender_name ? { senderName: sender.sender_name } : {}),
+    ...(senderName ? { senderName } : {}),
     text,
   }
 }
@@ -159,6 +170,25 @@ export class FeishuQuoteFetcher {
           ...(callOptions?.cardContent ? { card_msg_content_type: 'user_card_content' } : {}),
         },
       })
+  }
+
+  /**
+   * Just the sender of one message.
+   *
+   * `contact/v3/users/{id}` is gated by the APP's 通讯录 data scope, so it answers
+   * 41050 for everybody outside it — which is most of a group. The message itself
+   * carries the display name (`with_sender_name`), and reading it needs only the
+   * bot's normal message scope, so this is how a stranger gets a name
+   * (2026-11-12: 机器人见过的人全是「未知用户」).
+   */
+  async senderOf(messageId: string): Promise<{ senderOpenId?: string; senderName?: string }> {
+    if (!messageId) return {}
+    try {
+      return senderOfPayload(await this.get(messageId))
+    } catch (error) {
+      this.options.logger?.warn(`feishu-card: could not read sender of ${messageId}: ${error}`)
+      return {}
+    }
   }
 
   /**

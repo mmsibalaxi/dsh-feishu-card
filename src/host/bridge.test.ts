@@ -20,12 +20,64 @@ function makeWorld(
     defaultModel?: unknown
     /** Omit `agent.model`, mimicking a core without the pre-step route switch. */
     withModelHandle?: boolean
+    /** hermes-style reset clocks, read once per turn. */
+    resetPolicy?: { idleHours: number; dailyHour: number }
+    /** Frozen clock, so the reset tests do not depend on the wall time. */
+    now?: number
   } = {},
 ) {
   const listeners = new Map<string, ((p: never) => void)[]>()
   const created: { sessionId: string; agentOptions?: unknown; setup?: unknown }[] = []
   /** Routes pinned through the core's `agent.model.select()`. */
   const selections: { provider: string; model: string; reasoningEffort?: string }[] = []
+  /** The fake agents themselves, so a test can act like the chat UI. */
+  const agents: { options: { provider?: string; model?: string; reasoningEffort?: string } }[] = []
+  /** Session ids the bridge asked to RESUME (a kept conversation). */
+  const resumed: string[] = []
+  /** Text delivered to each fake agent's `followup`. */
+  const followUps: string[] = []
+
+  /** One fake agent: enough of the real shape to drive a turn through. */
+  const makeAgent = (id: string, agentOptions?: unknown) => {
+    const agent = {
+      id,
+      options: (agentOptions ?? {}) as { model?: string },
+      session: { id },
+      ...(withModelHandle === false
+        ? {}
+        : {
+            model: {
+              select: (next: { provider: string; model: string; reasoningEffort?: string }) => {
+                selections.push(next)
+              },
+            },
+          }),
+      followup(message: { content: { text: string }[] }) {
+        // The text actually delivered to the agent — the reset notice rides here.
+        followUps.push(message.content.map((part) => part.text).join('\n'))
+        // One realistic turn: two attempts (each with its own `end` frame),
+        // then the durable turn boundary that actually ends the turn.
+        const stream = listeners.get('agent/assistant-stream') ?? []
+        for (const l of stream) {
+          l({ agent, frame: { type: 'chunk', chunk: { type: 'text-delta', text: '先查一下' } } } as never)
+          l({ agent, frame: { type: 'end' } } as never)
+          l({ agent, frame: { type: 'start' } } as never)
+          l({ agent, frame: { type: 'chunk', chunk: { type: 'text-delta', text: '好的' } } } as never)
+          l({ agent, frame: { type: 'end' } } as never)
+        }
+        for (const l of listeners.get('session/event') ?? []) {
+          l(agent.session, {
+            type: 'assistant/message',
+            data: { message: { role: 'assistant', content: [{ type: 'text', text: '好的' }] } },
+          } as never)
+          l(agent.session, { type: 'turn/end', data: { reason: { kind: 'completed' } } } as never)
+        }
+        void message
+      },
+    }
+    agents.push(agent)
+    return agent
+  }
   /** Events the plugin registers on the agent's scoped context. */
   const agentEvents: string[] = []
   /** The listeners themselves, so a test can drive a prompt assembly. */
@@ -68,46 +120,18 @@ function makeWorld(
     agents: {
       async create(options: { sessionId: string; agentOptions?: unknown; setup?: (c: never) => Promise<void> }) {
         created.push(options)
-        const agent = {
-          id: options.sessionId,
-          options: (options.agentOptions ?? {}) as { model?: string },
-          session: { id: options.sessionId },
-          ...(withModelHandle === false
-            ? {}
-            : {
-                model: {
-                  select: (next: { provider: string; model: string; reasoningEffort?: string }) => {
-                    selections.push(next)
-                  },
-                },
-              }),
-          followup(message: { content: { text: string }[] }) {
-            // One realistic turn: two attempts (each with its own `end` frame),
-            // then the durable turn boundary that actually ends the turn.
-            const stream = listeners.get('agent/assistant-stream') ?? []
-            for (const l of stream) {
-              l({ agent, frame: { type: 'chunk', chunk: { type: 'text-delta', text: '先查一下' } } } as never)
-              l({ agent, frame: { type: 'end' } } as never)
-              l({ agent, frame: { type: 'start' } } as never)
-              l({ agent, frame: { type: 'chunk', chunk: { type: 'text-delta', text: '好的' } } } as never)
-              l({ agent, frame: { type: 'end' } } as never)
-            }
-            for (const l of listeners.get('session/event') ?? []) {
-              l(agent.session, {
-                type: 'assistant/message',
-                data: { message: { role: 'assistant', content: [{ type: 'text', text: '好的' }] } },
-              } as never)
-              l(agent.session, { type: 'turn/end', data: { reason: { kind: 'completed' } } } as never)
-            }
-            void message
-          },
-        }
+        const agent = makeAgent(options.sessionId, options.agentOptions)
         // The factory awaits setup BEFORE publishing, exactly like the real loop.
         if (options.setup) await options.setup(agentCtx as never)
         return { agent, dispose: async () => undefined }
       },
-      async resume() {
-        throw new Error('no session')
+      async resume(options: { resumeSessionId: string; agentOptions?: unknown; setup?: (c: never) => Promise<void> }) {
+        // A resumed session keeps its id, which is how a test tells "the old
+        // conversation was kept" from "the reset policy started a new one".
+        resumed.push(options.resumeSessionId)
+        const agent = makeAgent(options.resumeSessionId, options.agentOptions)
+        if (options.setup) await options.setup(agentCtx as never)
+        return { agent, dispose: async () => undefined }
       },
     },
   }
@@ -119,8 +143,10 @@ function makeWorld(
     // Read per session, so a panel edit or a /model switch applies to the next
     // one without restarting dsh.
     model: options.model ? () => options.model : undefined,
+    ...(options.resetPolicy ? { resetPolicy: () => options.resetPolicy! } : {}),
+    ...(options.now === undefined ? {} : { now: () => options.now! }),
   })
-  return { bridge, created, listeners, ctx, agentEvents, selections, agentListeners }
+  return { bridge, created, agents, resumed, followUps, listeners, ctx, agentEvents, selections, agentListeners, store }
 }
 
 /** Emit one complete turn on the given agent id. */
@@ -184,6 +210,101 @@ describe('agent creation wiring ({{model}} regression)', () => {
     expect(world.agentEvents).not.toContain('agent/request')
     expect(world.agentEvents).not.toContain('system-prompt/assemble-via-agent-request')
     expect(world.agentEvents.filter((name) => name === 'system-prompt/assemble')).toHaveLength(1)
+  })
+
+  it('adopts a model switched from the chat UI instead of pinning it back', async () => {
+    // The chat UI switches a LIVE agent's model through the core, without
+    // touching the plugin's config. The next Feishu turn must keep it.
+    const options: { model: { provider: string; model: string } | undefined } = {
+      model: { provider: 'magpie', model: 'auto/glm-5.3-flash' },
+    }
+    const world = makeWorld(options)
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: 'hi' })
+
+    world.agents[0].options = { provider: 'magpie', model: 'auto/kimi-k3.1-pro' }
+    world.selections.length = 0
+
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: '再看一眼' })
+    expect(world.selections).toEqual([]) // not fought back
+    expect(world.created).toHaveLength(1)
+
+    // …and it stays adopted, turn after turn.
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: '第三句' })
+    expect(world.selections).toEqual([])
+  })
+
+  it('a panel edit still beats a chat-level switch', async () => {
+    const options: { model: { provider: string; model: string } | undefined } = {
+      model: { provider: 'magpie', model: 'auto/glm-5.3-flash' },
+    }
+    const world = makeWorld(options)
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: 'hi' })
+    world.agents[0].options = { provider: 'magpie', model: 'auto/kimi-k3.1-pro' }
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: '再看一眼' })
+
+    // The user now changes the panel: that is a deliberate default change and
+    // must win over the chat-level pickup.
+    world.selections.length = 0
+    options.model = { provider: 'magpie', model: 'auto/deepseek-v4.1-flash' }
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: '再换' })
+    expect(world.selections).toEqual([{ provider: 'magpie', model: 'auto/deepseek-v4.1-flash' }])
+  })
+
+  it('a running conversation picks up a changed default on its NEXT turn', async () => {
+    // 2026-11-16 bug report: after switching the default model in the panel,
+    // later conversations kept the old model — only a dsh restart applied it.
+    // The live agent's route is fixed at construction, so every turn now
+    // re-checks and pins what the panel asks for.
+    const options: { model: { provider: string; model: string } | undefined } = {
+      model: { provider: 'magpie', model: 'auto/glm-5.3-flash' },
+    }
+    const world = makeWorld(options)
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: 'hi' })
+    expect(world.created[0].agentOptions).toMatchObject({ model: 'auto/glm-5.3-flash' })
+
+    world.selections.length = 0
+    options.model = { provider: 'magpie', model: 'auto/kimi-k3.1-pro' }
+
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: '再看一眼' })
+    // Same agent (no rebuild, no lost history) — just re-routed.
+    expect(world.created).toHaveLength(1)
+    expect(world.selections).toEqual([{ provider: 'magpie', model: 'auto/kimi-k3.1-pro' }])
+  })
+
+  it('falls back to rebuilding when the core has no live model handle', async () => {
+    const options: {
+      model: { provider: string; model: string } | undefined
+      withModelHandle: boolean
+    } = {
+      model: { provider: 'magpie', model: 'auto/glm-5.3-flash' },
+      withModelHandle: false,
+    }
+    const world = makeWorld(options)
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: 'hi' })
+    expect(world.created).toHaveLength(1)
+
+    options.model = { provider: 'magpie', model: 'auto/kimi-k3.1-pro' }
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: '再看一眼' })
+    // The agent is rebuilt around the same session log (a resume, not a new
+    // conversation), and the rebuilt agent carries the new route.
+    expect(world.resumed).toHaveLength(1)
+    expect(world.agents.at(-1)?.options).toMatchObject({ model: 'auto/kimi-k3.1-pro' })
+  })
+
+  it('a /model pickup does not survive /new, so the configured default wins again', async () => {
+    const options: { model: { provider: string; model: string } | undefined } = {
+      model: { provider: 'magpie', model: 'auto/glm-5.3-flash' },
+    }
+    const world = makeWorld(options)
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: 'hi' })
+    await world.bridge.setModel('oc_1', { provider: 'magpie', model: 'auto/deepseek-v4.1-flash' })
+    expect(world.bridge.modelOverride('oc_1')).toBeDefined()
+
+    await world.bridge.reset('oc_1')
+    expect(world.bridge.modelOverride('oc_1')).toBeUndefined()
+
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: '新话题' })
+    expect(world.created.at(-1)?.agentOptions).toMatchObject({ model: 'auto/glm-5.3-flash' })
   })
 
   it('explicit config wins over the host default', async () => {
@@ -256,6 +377,61 @@ describe('agent creation wiring ({{model}} regression)', () => {
     expect(world.created[0].agentOptions).toBeUndefined()
     // The session is still recorded, so a later message retries with a model.
     expect(world.bridge.describe('oc_1').sessionId).toBe(world.created[0].sessionId)
+  })
+})
+
+describe('session reset clocks (idle gap / daily hour)', () => {
+  const HOUR = 3_600_000
+  const morning = new Date(2026, 10, 16, 10, 0, 0, 0).getTime()
+
+  /** Seed the persisted session map as if the chat spoke `idleMs` ago. */
+  const seed = async (
+    world: ReturnType<typeof makeWorld>,
+    sessionId: string,
+    updatedAt: number,
+    createdAt = updatedAt,
+  ) => {
+    await world.store.load()
+    await world.store.put('oc_1', { sessionId, workspace: 'D:\\work', updatedAt, createdAt })
+  }
+
+  it('resumes a conversation that is still fresh', async () => {
+    const world = makeWorld({ resetPolicy: { idleHours: 6, dailyHour: -1 }, now: morning })
+    await seed(world, 'sess-old', morning - 1 * HOUR)
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: '继续' })
+    expect(world.resumed).toEqual(['sess-old'])
+    expect(world.created).toHaveLength(0)
+    expect(world.store.get('oc_1')?.sessionId).toBe('sess-old')
+  })
+
+  it('starts a new session after the idle gap, and tells the model why', async () => {
+    const world = makeWorld({ resetPolicy: { idleHours: 6, dailyHour: -1 }, now: morning })
+    await seed(world, 'sess-old', morning - 7 * HOUR)
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: '还在吗' })
+    // Not resumed: a brand-new session id was created instead.
+    expect(world.resumed).toEqual([])
+    expect(world.created).toHaveLength(1)
+    expect(world.store.get('oc_1')?.sessionId).not.toBe('sess-old')
+    // The prompt carries the notice, so the model knows why it lost context.
+    // It names the CONFIGURED threshold (6 hours), not the exact gap.
+    expect(world.followUps[0]).toContain('6 小时')
+    expect(world.followUps[0]).toContain('还在吗')
+  })
+
+  it('rolls over on the daily hour too', async () => {
+    const world = makeWorld({ resetPolicy: { idleHours: 0, dailyHour: 4 }, now: morning })
+    // Started yesterday, last spoke 20 minutes ago: idle is fine, the day turned.
+    await seed(world, 'sess-old', morning - 20 * 60_000, morning - 26 * HOUR)
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: '早' })
+    expect(world.resumed).toEqual([])
+    expect(world.followUps[0]).toContain('04:00')
+  })
+
+  it('never resets anything while both clocks are off', async () => {
+    const world = makeWorld({ resetPolicy: { idleHours: 0, dailyHour: -1 }, now: morning })
+    await seed(world, 'sess-old', 0, 0)
+    await world.bridge.handleMessage({ sessionKey: 'oc_1', chatId: 'oc_1', text: '继续' })
+    expect(world.resumed).toEqual(['sess-old'])
   })
 })
 
@@ -740,3 +916,6 @@ describe('per-turn card isolation', () => {
     expect((states[1] as { rounds: number }).rounds).toBe(1)
   })
 })
+
+
+

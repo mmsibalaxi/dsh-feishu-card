@@ -9,6 +9,7 @@ export const AUTH_PATH = '/api/feishu-card/auth'
 export const SEARCH_PATH = '/api/feishu-card/search'
 export const NAMES_PATH = '/api/feishu-card/names'
 export const CHAT_SEARCH_PATH = '/api/feishu-card/chat-search'
+export const IDENTITY_PATH = '/api/feishu-card/identity'
 
 /** What the panel needs to render the authorisation state. */
 export interface AuthState {
@@ -53,6 +54,35 @@ export function searchUrl(query: string): string {
 /** Keyword search over the groups the bot can see (no delegated token needed). */
 export function chatSearchUrl(query: string): string {
   return `${CHAT_SEARCH_PATH}?q=${encodeURIComponent(query)}`
+}
+
+/**
+ * Which entries belong to a previous bot identity.
+ *
+ * open_ids are per Feishu app, so after an App ID switch every allowlist entry
+ * is dead. The Host knows each id's birth app; the panel just renders the verdict.
+ */
+export function identityUrl(ids: readonly string[]): string {
+  return `${IDENTITY_PATH}?ids=${ids.map((id) => encodeURIComponent(id)).join(',')}`
+}
+
+export interface IdentityState {
+  /** The App ID this process is configured with. */
+  appId: string
+  /** open_id → the App ID it was first seen under (only the stale ones). */
+  stale: Record<string, string>
+}
+
+export function parseIdentity(payload: unknown): IdentityState {
+  if (typeof payload !== 'object' || payload === null) return { appId: '', stale: {} }
+  const body = payload as { appId?: unknown; stale?: unknown }
+  const stale: Record<string, string> = {}
+  if (typeof body.stale === 'object' && body.stale !== null) {
+    for (const [id, appId] of Object.entries(body.stale as Record<string, unknown>)) {
+      if (typeof appId === 'string' && appId) stale[id] = appId
+    }
+  }
+  return { appId: typeof body.appId === 'string' ? body.appId : '', stale }
 }
 
 /** Ask the Host to resolve open_ids to names (comma-separated, like the allowlist). */

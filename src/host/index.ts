@@ -16,6 +16,8 @@ import { readModelCatalog } from './models.ts'
 import { RecentContacts } from './recent.ts'
 import { DirectorySearch } from './directory.ts'
 import { ChatNames, NameBook } from './names.ts'
+import { AppIdentity } from './app-identity.ts'
+import { FeishuQuoteFetcher } from './quote.ts'
 import { PLUGIN_ID } from '../shared/types.js'
 
 /** `~/.dsh` (or `$DSH_HOME`), the one place this plugin keeps its own files. */
@@ -147,6 +149,30 @@ export async function apply(ctx: Context, config: RawConfig): Promise<void> {
     }
   }, 'feishu-card: name cache')
 
+  // open_ids are scoped to one Feishu app: after an App ID switch every entry in
+  // the allowlist belongs to the OLD bot and silently stops matching. Remember
+  // each id's birth app so the panel can flag and clean those entries.
+  const identity = new AppIdentity({
+    file: path.join(homeDir(), 'feishu-card', 'app-identity.json'),
+    log: (message) => ctx.logger.debug(message),
+  })
+  const userIdsOf = (config: ResolvedConfig): string[] => [
+    ...config.allowlist,
+    ...config.groupSenderAllowlist,
+  ]
+  ctx.effect(() => {
+    void (async () => {
+      await identity.load()
+      // Seed the history with THIS boot's app + ids. If the App ID is later
+      // changed (panel save or the next boot), those ids get stamped with the
+      // app that issued them — which is what makes the warning possible at all.
+      identity.observe(userIdsOf(read()), read().appId)
+    })()
+    return () => {
+      void identity.flush()
+    }
+  }, 'feishu-card: app identity')
+
   // "Search the directory as me": the bot's own 通讯录 scope is one person, but
   // the person's own visibility is the whole company. Rides the Device Flow, so
   // there is no redirect URL to register and no callback listener to run.
@@ -164,6 +190,17 @@ export async function apply(ctx: Context, config: RawConfig): Promise<void> {
     return () => {}
   }, 'feishu-card: delegated token')
 
+  /**
+   * One message reader shared by the panel's name fallback and the bridge's
+   * sender/quote headers, so both learn names from the same `message.get` call.
+   */
+  const quote = new FeishuQuoteFetcher({
+    appId: initial.appId,
+    appSecret: initial.appSecret,
+    brand: initial.brand,
+    logger: { warn: (message) => ctx.logger.debug(message) },
+  })
+
   /** Chat names: cache first, then the bot's own `im/v1/chats/{id}`. */
   const resolveChatNames = async (ids: readonly string[]): Promise<Record<string, string>> => {
     const known = nameBook.chatsOf(ids)
@@ -174,6 +211,39 @@ export async function apply(ctx: Context, config: RawConfig): Promise<void> {
     return { ...known, ...resolved }
   }
 
+  /**
+   * People names for the panel, including people OUTSIDE the app's 通讯录 scope.
+   *
+   * The delegated token resolves whoever the person can see, but the app's own
+   * `contact/v3/users/{id}` is scope-bound (`41050`), so most colleagues had no
+   * name at all — that is why "机器人见过的人" was a row of 未知用户 (2026-11-12).
+   * The last message each person sent carries their display name
+   * (`with_sender_name`), and reading it needs no contact scope at all.
+   */
+  const resolveUserNames = async (
+    ids: readonly string[],
+  ): Promise<{ names: Record<string, string>; error?: string }> => {
+    const first = await directory.names(ids)
+    const missing = ids.filter((id) => !first.names[id])
+    if (missing.length === 0) return first
+    const byId = new Map(recent.list().map((person) => [person.openId, person]))
+    const learned: Record<string, string> = {}
+    for (const id of missing) {
+      const messageId = byId.get(id)?.messageId
+      if (!messageId) continue
+      const sender = await quote.senderOf(messageId)
+      if (sender.senderName) learned[id] = sender.senderName
+    }
+    if (Object.keys(learned).length > 0) {
+      nameBook.rememberUsers(learned)
+      await nameBook.flush()
+    }
+    return {
+      names: { ...first.names, ...learned },
+      ...(first.error ? { error: first.error } : {}),
+    }
+  }
+
   registerPanelRoutes(
     ctx,
     {
@@ -181,9 +251,17 @@ export async function apply(ctx: Context, config: RawConfig): Promise<void> {
       recent: () => ({ people: recent.list(), chats: recent.chats() }),
       directory,
       names: {
-        users: (ids) => directory.names(ids),
+        users: resolveUserNames,
         chats: resolveChatNames,
         chatSearch: (query) => chatNames.search(query),
+      },
+      identity: {
+        appId: () => read().appId,
+        staleAmong: (ids) => identity.staleAmong(ids, read().appId),
+        remember: (ids) => {
+          const live = read()
+          identity.remember(ids.length > 0 ? ids : userIdsOf(live), live.appId)
+        },
       },
     },
     (message) => ctx.logger.info(message),
@@ -204,6 +282,9 @@ export async function apply(ctx: Context, config: RawConfig): Promise<void> {
     recent,
     directory,
     names: nameBook,
+    // Share the one message reader built above (its sender fallback is what
+    // names people outside the app's contact scope).
+    createQuote: () => quote,
   })
 
   // Cordis has no typed 'dispose' event; an async effect is the supported way

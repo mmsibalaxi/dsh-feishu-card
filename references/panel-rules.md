@@ -80,8 +80,15 @@ POST https://open.feishu.cn/open-apis/authen/v2/oauth/token
 15.15 **单卡有预算，长答案要续卡**（第 28 轮）：`ANSWER_MAX_BYTES`（≈13KB markdown）之外不能只截断。`splitAnswer()` 按字节切、**优先段落边界**、上限 4 段；主卡显示第 1 段 +「已续到下一张卡片」，其余 seal 后作为**静态卡**发出（fire-and-forget，失败不影响封卡）。
 15.16 **面板（工具列表）是写链上最大的负担**（第 28 轮实测：72% 的 flush 不推进正文、中位间隔 913ms）：面板刷新周期 2s，最多 24 行，**只有最新 5 行带参数预览**（错误行永远保留）。面板和正文仍必须同一个 `batchUpdate`（同一张卡 sequence 单调，真并行必撞 300317）。
 15.17 **面板可以关，但「不存在的元素」不能 patch**（第 29 轮）：`showPanel=false` 时初始卡不创建 panel，所以 flush 不发改动、**seal 计划也不能带 panel 动作**（`buildSealPlan({panelContent: undefined})` 会跳过）。patch 一个不存在的 `element_id` 会让整批 `batchUpdate` 回滚——答案会一起丢。
-15.18 **「思考中」要读秒**（第 29 轮用户要求：确保不是 bug 卡住了）：loading 行每秒改成 `思考中 12s`，只更新这一个元素；**只要正文待写或正在封卡就跳过这一秒**，别跟打字机抢同一条串行写链。封卡/撤回时停表。
+15.18 **「还在干活」那一行要读秒，并按固定节拍排程**（第 29/31 轮）：每秒把 loading 行改成 `正在搬砖 7s`（整数秒——`7.2s` 像跑分不像时钟；文案**每 60 秒**轮换一句（3 秒太频繁，2026-11-11 用户反馈），`PENDING_LABELS`）。三个坑：① 忙的时候**不能 return 丢掉整秒**，要 250ms 后重试，否则工具密集期会僵 2-3 秒，用户以为卡死；② 下一跳按**固定 1s 节拍**排（`1000 - 本次写耗时`），不能「写完再等 1 秒」——一次 batchUpdate 往返 300-500ms，否则实际周期 1.4s；③ 正文待写或正在封卡时让打字机优先。
+15.181 **「卡 3 秒」先查自己的跳过逻辑，再怀疑平台**（第 31 轮）：飞书每次写确实有 300-500ms 延迟，但读数僵住是我们丢秒造成的；改成节拍 + 快速重试后实测间隔 1037/1015/1003/981/997ms。
 15.19 **表情要按结局区分**（第 29 轮）：✅ 只给真的答出来的回合；**中断（/stop、卡内按钮、超时）用 `THINKING`（🤔）**，没产出才撤表情。飞书 emoji key 实测有效集合：`DONE`/`OnIt`/`THINKING`/`Shrug`/`GLANCE`；`Thinking`/`Confused`/`Question`/`Surprised` 一律 `231001 reaction type is invalid`。
+12.989 **换机器人身份 = 白名单全废**（第 30 轮）：`open_id` 按应用隔离，改 App ID 后所有 `ou_` 都失效，而面板看起来一切正常。`app-identity.ts` 记 `open_id → 首次出现的 App ID`（外加磁盘 appId + 上次配置的 id 列表）来识别切换；**盖旧戳只能盖「上次那批 id」**，不能盖当前列表（里面可能已有新身份下的新人，盖错就永久冤枉）。`oc_` 群 id 是租户级，换应用不变，**不要**标记。历史从这一版才有：装之前就换过的无法证明，别瞎标。
+12.99 **群选择框一次最多 20 个**（第 30 轮：机器人在 100+ 群，截图一整屏）：超出时提示「共 N 个，只显示前 20 个，输入关键字缩小范围」。
+12.991 **「机器人见过的人」全是未知用户**（第 32 轮）：事件报文不带人名；`contact/v3/users/{id}` 受**应用通讯录数据范围**管（外一律 41050）；`chats/{id}/members` 实测 **99991672 应用尚未开通**（列表里有、没生效）。唯一不要通讯录权限的路子是**读消息**：`im/v1/messages/{id}?with_sender_name=true`（bot token 即可，真机验证返回 `sender_name`）。所以：`recent.json` 每人记下**最后一条消息 id**，拿不到名字时读它，命中后写进 NameBook；引用消息的 sender 名也顺手记。注意**旧记录没有消息 id**（user token 列群消息会 230002，人不在群里），那批只能等本人再发一条。
+15.91 **聊天界面切的模型不能被插件钉回去**（第 34 轮）：每轮对账时，「面板没变 + agent 路由自己动了 + 不是我刚要求的路由」= 用户在会话里手动切的 → **采纳**（`route-adopted`），并一直保持；只有面板再改（或 `/model`）才重新夺回。`system-prompt/assemble` 的 `{{provider}}/{{model}}` 也要以 `context.agent.options` 为准，否则切了模型提示词还写着旧名字。
+15.9 **模型路由只在创建时生效，必须每轮对账**（第 33 轮）：`agentOptions` 只给**新建**的 agent 定路由；已存在的会话里 `Agent.options` 是创建时定死的。所以面板改默认模型后，老会话不动、`/new` 也可能被残留的 `/model` 覆盖顶住，用户只能重启 dsh（进程内 `modelOverrides`/`routed` 全在内存里，重启即清）。正确做法：每轮开头比对「应有路由 vs agent 实际路由」，有 `agent.model.select()` 就钉（不丢上下文），没有就丢掉 live agent 用同一份会话日志重建；`routed` 记住已要求过的路由，稳态零开销。`/new` 必须**丢弃**该会话的 `/model` 覆盖。同族坑：任何 `read().xxx` 被存成快照（如 `turnTimeoutMs`）都要改成闭包/函数，否则同样"只有重启才生效"。
+15.92 **会话要能自己过期**（第 35 轮，hermes 同款）：两个时钟——`resetIdleHours`（最后一条消息距今，默认 6h）与 `resetDailyHour`（会话**开始时间**早于最近的 hour:00，默认关）。判定放在每轮开头，命中就丢 live agent、删持久化会话、**同时清 `/model` 覆盖**（否则新会话还带着旧路由），并在本轮 prompt 前面加一句中文提示，让模型知道自己为什么没上下文。**不要用定时器**：懒判定才不会在进程离线时「半夜自己重置」，重启后按 `sessions.json` 里的时间戳照样判断。老记录没有 `createdAt` 时回退用 `updatedAt`。
 16. **`agent/assistant-stream` 的 `end` 是每次 LLM 尝试的结束，不是一轮的结束**；一轮的边界是持久化的 `session/event` → `turn/end`。
 17. **一个应用只能有一条长连接**：起第二个实例会偷事件，表现为"插件时好时坏"。本地调试前先杀掉其他 `DeepSeek Harness` 进程。
 18. **open_id 按应用隔离**，同一个人不同应用下不一样。
@@ -110,3 +117,7 @@ POST https://open.feishu.cn/open-apis/authen/v2/oauth/token
 19. **要验证"有密钥"的分支但又不能起桥接**：把 `appId` 置空、保留 `appSecret`——插件 `apply()` 会提前返回（休眠），但设置命名空间仍然被服务，面板照常渲染。
 20. **截图走查**：`agent-browser --session <名字> open <带 token 的 URL>` → `snapshot -i --json` 拿 ref → `click "@e35"` → `screenshot`。注意 `find text "保存"` 会点错元素，用 `.fc-save` 这种选择器或 ref 更可靠。
 21. **`ctx.logger` 不会出现在 CLI stdout**；看插件自己的 `~/.dsh/feishu-card/trace.log`。
+
+
+
+

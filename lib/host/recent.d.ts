@@ -6,6 +6,14 @@ export interface SeenSender {
     at: number;
     /** How many messages seen from them, so a repeat sender sorts higher. */
     count: number;
+    /**
+     * The last message they sent.
+     *
+     * `im/v1/messages/{id}?with_sender_name=true` is readable with the BOT token
+     * and returns the sender's display name — the only way to name somebody
+     * outside the app's contact scope (2026-11-12).
+     */
+    messageId?: string;
 }
 export interface RecentContactsOptions {
     /** JSON file holding the ring; its directory is created on first save. */
@@ -30,7 +38,7 @@ export declare class RecentContacts {
     /** Read the persisted ring; a missing or corrupt file just starts empty. */
     load(): Promise<void>;
     /** Record one inbound message's sender. Cheap: in-memory, save is debounced. */
-    note(openId: string, chatId: string, at?: number): void;
+    note(openId: string, chatId: string, at?: number, messageId?: string): void;
     /** Recent senders, newest first. */
     list(): SeenSender[];
     /** Distinct chats seen recently, newest first — the group allowlist's shortcut. */

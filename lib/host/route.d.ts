@@ -21,6 +21,7 @@ export declare const AUTH_PATH = "/api/feishu-card/auth";
 export declare const SEARCH_PATH = "/api/feishu-card/search";
 export declare const NAMES_PATH = "/api/feishu-card/names";
 export declare const CHAT_SEARCH_PATH = "/api/feishu-card/chat-search";
+export declare const IDENTITY_PATH = "/api/feishu-card/identity";
 /** One sender the bot has heard from, as the panel's shortcut row shows it. */
 export interface RecentEntry {
     openId: string;
@@ -90,6 +91,15 @@ export interface PanelRouteDeps {
             }[];
             error?: string;
         }>;
+    };
+    /**
+     * Which app each open_id was first seen under, so the panel can flag entries
+     * left behind by a previous bot identity (open_ids are per-app).
+     */
+    identity: {
+        appId(): string;
+        staleAmong(ids: readonly string[]): Record<string, string>;
+        remember(ids: readonly string[]): void;
     };
 }
 /** The slice of node's http types these handlers touch (keeps tests fake-free). */

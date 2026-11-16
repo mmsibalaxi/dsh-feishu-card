@@ -22,6 +22,7 @@ export const AUTH_PATH = '/api/feishu-card/auth'
 export const SEARCH_PATH = '/api/feishu-card/search'
 export const NAMES_PATH = '/api/feishu-card/names'
 export const CHAT_SEARCH_PATH = '/api/feishu-card/chat-search'
+export const IDENTITY_PATH = '/api/feishu-card/identity'
 
 /** One sender the bot has heard from, as the panel's shortcut row shows it. */
 export interface RecentEntry {
@@ -65,6 +66,15 @@ export interface PanelRouteDeps {
       chats: { chatId: string; name: string }[]
       error?: string
     }>
+  }
+  /**
+   * Which app each open_id was first seen under, so the panel can flag entries
+   * left behind by a previous bot identity (open_ids are per-app).
+   */
+  identity: {
+    appId(): string
+    staleAmong(ids: readonly string[]): Record<string, string>
+    remember(ids: readonly string[]): void
   }
 }
 
@@ -193,6 +203,27 @@ export async function handlePanelRequest(
     return
   }
 
+  if (url.pathname === IDENTITY_PATH) {
+    const ids = (url.searchParams.get('ids') ?? '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter((id) => id.startsWith('ou_'))
+      .slice(0, 60)
+    try {
+      // Learn where the CURRENT entries came from before answering: a first run
+      // with a new App ID must keep the old entries' birth app.
+      deps.identity.remember(ids)
+      reply(res, 200, {
+        ok: true,
+        appId: deps.identity.appId(),
+        stale: deps.identity.staleAmong(ids),
+      })
+    } catch (cause) {
+      reply(res, 200, { ok: false, appId: '', stale: {}, error: String(cause) })
+    }
+    return
+  }
+
   if (url.pathname === RECENT_PATH) {
     try {
       const seen = deps.recent()
@@ -268,9 +299,10 @@ export function registerPanelRoutes(
             server.register({ kind: 'exact', path: SEARCH_PATH, handler }),
             server.register({ kind: 'exact', path: NAMES_PATH, handler }),
             server.register({ kind: 'exact', path: CHAT_SEARCH_PATH, handler }),
+            server.register({ kind: 'exact', path: IDENTITY_PATH, handler }),
           ]
           log?.(
-            `feishu-card: 面板路由已挂载 (${MODELS_PATH}, ${RECENT_PATH}, ${AUTH_PATH}, ${SEARCH_PATH}, ${NAMES_PATH}, ${CHAT_SEARCH_PATH})`,
+            `feishu-card: 面板路由已挂载 (${MODELS_PATH}, ${RECENT_PATH}, ${AUTH_PATH}, ${SEARCH_PATH}, ${NAMES_PATH}, ${CHAT_SEARCH_PATH}, ${IDENTITY_PATH})`,
           )
         } catch (error) {
           log?.(`feishu-card: route registration failed: ${String(error)}`)

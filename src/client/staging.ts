@@ -45,6 +45,8 @@ export interface Draft {
   requireMentionInGroups: boolean
   respondToMentionAll: boolean
   allowBots: BotPolicy
+  resetIdleHours: number
+  resetDailyHour: number
   sessionScope: SessionScope
   replyMode: ReplyMode
   footerFields: FooterField[]
@@ -87,6 +89,9 @@ export function draftFrom(value: FeishuCardConfig): Draft {
     requireMentionInGroups: value.requireMentionInGroups ?? true,
     respondToMentionAll: value.respondToMentionAll ?? false,
     allowBots: value.allowBots ?? 'none',
+    // hermes-style reset clocks: 0 hours / -1 hour both mean never.
+    resetIdleHours: value.resetIdleHours ?? 6,
+    resetDailyHour: value.resetDailyHour ?? -1,
     sessionScope: value.sessionScope ?? 'chat',
     replyMode: value.replyMode ?? 'streaming',
     footerFields: [...(value.footerFields ?? [])],
@@ -122,6 +127,8 @@ export function sameDraft(a: Draft, b: Draft): boolean {
     a.requireMentionInGroups === b.requireMentionInGroups &&
     a.respondToMentionAll === b.respondToMentionAll &&
     a.allowBots === b.allowBots &&
+    a.resetIdleHours === b.resetIdleHours &&
+    a.resetDailyHour === b.resetDailyHour &&
     a.sessionScope === b.sessionScope &&
     a.replyMode === b.replyMode &&
     sameList(a.footerFields, b.footerFields) &&
@@ -166,6 +173,8 @@ export function saveOps(draft: Draft, saved: Draft): PathOp[] {
   set('requireMentionInGroups', draft.requireMentionInGroups)
   set('respondToMentionAll', draft.respondToMentionAll)
   set('allowBots', draft.allowBots)
+  set('resetIdleHours', draft.resetIdleHours)
+  set('resetDailyHour', draft.resetDailyHour)
   set('sessionScope', draft.sessionScope)
   set('replyMode', draft.replyMode)
   set('footerFields', draft.footerFields)
@@ -304,4 +313,6 @@ export function secretConfigured(
   const mine = namespaces.find((candidate) => candidate.ns === entryId)
   return (mine?.secrets ?? []).some((secret) => secret.set)
 }
+
+
 

@@ -46,6 +46,7 @@ export declare const cls: {
     readonly chips: "fc-chips";
     readonly chip: "fc-chip";
     readonly chipName: "fc-chipName";
+    readonly chipNote: "fc-chipNote";
     readonly chipId: "fc-chipId";
     readonly chipX: "fc-chipX";
     readonly suggest: "fc-suggest";

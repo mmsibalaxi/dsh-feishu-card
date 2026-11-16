@@ -12,6 +12,8 @@ export interface SessionRecord {
   sessionId: string
   workspace: string
   updatedAt: number
+  /** When this session was started — the anchor for the daily reset clock. */
+  createdAt?: number
 }
 
 interface FileShape {

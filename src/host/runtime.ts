@@ -361,7 +361,15 @@ export function createRuntime(
     ask,
     approvals,
     attachWorkspace,
-    turnTimeoutMs: read().turnTimeoutMs,
+    // Evaluated per call, never captured: a snapshot here meant the panel's timeout
+// only applied after restarting dsh (same family of bug as the model, 2026-11-16).
+    turnTimeoutMs: () => read().turnTimeoutMs,
+    // Same rule as every other panel field: read per turn, so changing the
+    // reset clock applies to the next message instead of the next restart.
+    resetPolicy: () => {
+      const config = read()
+      return { idleHours: config.resetIdleHours, dailyHour: config.resetDailyHour }
+    },
     /**
      * One card per turn, or undefined for a plain-text reply.
      *
@@ -536,7 +544,7 @@ export function createRuntime(
     if (!dedup.check(info.eventId)) return
     // Recorded before the gate: the person who just got denied is exactly who
     // the allowlist should gain next.
-    recent.note(info.senderOpenId, info.chatId)
+    recent.note(info.senderOpenId, info.chatId, Date.now(), info.messageId)
     const mentionedBotId = info.mentions?.length ? await botOpenId() : undefined
     const message = normalizeInbound(
       {
@@ -670,6 +678,22 @@ export function createRuntime(
         ctx.logger.debug(`feishu-card: sender name lookup failed: ${String(error).slice(0, 160)}`)
       }
     }
+    // Last resort, and the only one that works outside the app's 通讯录 scope:
+    // read the message itself with `with_sender_name`. `contact/v3/users/{id}`
+    // answers 41050 for every colleague the app cannot see, which is why the
+    // panel's "机器人见过的人" row was all 未知用户 (2026-11-12).
+    if (!senderName) {
+      try {
+        const sender = await quote.senderOf(raw.messageId)
+        if (sender.senderName) {
+          senderName = sender.senderName
+          deps.names?.rememberUsers({ [message.senderOpenId]: sender.senderName })
+          trace('sender-name-from-message', { messageId: raw.messageId })
+        }
+      } catch (error) {
+        ctx.logger.debug(`feishu-card: sender name fallback failed: ${String(error).slice(0, 160)}`)
+      }
+    }
     const envelope: MessageEnvelope = {
       chatType: message.chatType,
       senderOpenId: message.senderOpenId,
@@ -721,7 +745,7 @@ export function createRuntime(
     // Recorded before the gate: the person who just got denied is exactly who
     // the allowlist should gain next, and their open_id here is already this
     // app's (no contact permission involved).
-    recent.note(raw.senderOpenId, raw.chatId)
+    recent.note(raw.senderOpenId, raw.chatId, Date.now(), raw.messageId)
     // Needed so "mentioned" means "mentioned ME": the mentions array lists every
     // @ in the message, colleagues included. Only looked up when the message
     // carries mentions at all (most do not), and cached after the first call.
@@ -1039,3 +1063,4 @@ function isFile(target: string): boolean {
 async function readFileBytes(target: string): Promise<Uint8Array> {
   return new Uint8Array(await readFile(target))
 }
+

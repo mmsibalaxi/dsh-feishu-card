@@ -71,6 +71,14 @@ export const Config = Schema.object({
     .default(CONFIG_DEFAULTS.respondToMentionAll)
     .description('@所有人 是否算作提及')
     .volatile(),
+  resetIdleHours: Schema.number()
+    .default(CONFIG_DEFAULTS.resetIdleHours)
+    .description('多少小时没消息就开新会话（0 = 不重置）')
+    .volatile(),
+  resetDailyHour: Schema.number()
+    .default(CONFIG_DEFAULTS.resetDailyHour)
+    .description('每天几点自动开新会话（0-23，-1 = 不重置）')
+    .volatile(),
   sessionScope: sessionScope.volatile(),
   replyMode: replyMode.volatile(),
   footerFields: Schema.array(Schema.union(FOOTER_FIELDS.map((f) => Schema.const(f))))
@@ -164,6 +172,8 @@ export function readConfig(raw: RawConfig | undefined): ResolvedConfig {
       CONFIG_DEFAULTS.requireMentionInGroups,
     ),
     respondToMentionAll: plain(source.respondToMentionAll, CONFIG_DEFAULTS.respondToMentionAll),
+    resetIdleHours: plain(source.resetIdleHours, CONFIG_DEFAULTS.resetIdleHours),
+    resetDailyHour: plain(source.resetDailyHour, CONFIG_DEFAULTS.resetDailyHour),
     sessionScope: plain(source.sessionScope, CONFIG_DEFAULTS.sessionScope),
     replyMode: plain(source.replyMode, CONFIG_DEFAULTS.replyMode),
     footerFields: [...plain<FooterField[]>(source.footerFields, CONFIG_DEFAULTS.footerFields)],
@@ -183,3 +193,4 @@ export function readConfig(raw: RawConfig | undefined): ResolvedConfig {
 }
 
 export default Config
+

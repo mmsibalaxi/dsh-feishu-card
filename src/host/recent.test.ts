@@ -66,6 +66,20 @@ describe('RecentContacts', () => {
     ])
   })
 
+  it('remembers the last message id, so the panel can look the name up later', async () => {
+    // `message.get?with_sender_name` is the only way to name somebody outside
+    // the app's contact scope (2026-11-12).
+    const first = make()
+    await first.load()
+    first.note('ou_a', 'oc_1', 1234, 'om_1')
+    first.note('ou_a', 'oc_1', 5678) // a later message without an id keeps the old one
+    await first.flush()
+
+    const second = make()
+    await second.load()
+    expect(second.list()[0]?.messageId).toBe('om_1')
+  })
+
   it('starts empty for a missing file', async () => {
     const recent = make()
     await recent.load()

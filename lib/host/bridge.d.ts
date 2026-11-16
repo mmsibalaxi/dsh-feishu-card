@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import { type Agent, type ModelSelection } from '@deepseek-ai/dsh-agent';
 import { StreamingCard } from './card/streaming.ts';
 import type { SessionStore } from './sessions.ts';
+import { type ResetPolicy } from './session-reset.ts';
 /**
  * Text blocks of one assistant message, in order.
  *
@@ -49,6 +50,12 @@ export interface TurnRequest {
     /** Bot display name / open_id, when the host knows them. */
     botName?: string;
     botOpenId?: string;
+    /**
+     * Set by the bridge (not the caller) when THIS turn had to start a new
+     * session because the old one went stale. Prepended to the prompt so the
+     * model knows why it has no context, and used for the card's hint.
+     */
+    resetNotice?: string;
 }
 /**
  * Live token counters for one turn, read by the card's footer source.
@@ -146,7 +153,14 @@ export interface BridgeOptions {
         register(agentCtx: Context): void;
     };
     /** Hard cap on one turn; the agent is cancelled when it expires. */
-    turnTimeoutMs?: number;
+    turnTimeoutMs?: number | (() => number);
+    /**
+     * When a conversation starts over (idle gap / daily hour). Read per turn, so
+     * a panel edit applies to the next message instead of the next restart.
+     */
+    resetPolicy?: () => ResetPolicy;
+    /** Clock override for tests (the reset clocks are time-based). */
+    now?: () => number;
 }
 export declare class FeishuBridge {
     private readonly ctx;
@@ -170,6 +184,16 @@ export declare class FeishuBridge {
      * the agent for that conversation is rebuilt, so the next turn gets it.
      */
     private modelOverrides;
+    /**
+     * Per conversation: the route this plugin considers authoritative, and where
+     * that decision came from. `agent` means somebody switched the model elsewhere
+     * (the chat UI) and the panel default must not stomp it back.
+     */
+    private routed;
+    /** Last observed agent routes, to notice a switch made outside this plugin. */
+    private seenRoute;
+    /** The panel's route as of the previous turn, to tell a panel edit from a chat switch. */
+    private lastConfigRoute;
     /** Sessions whose live agent uses a stale model and must be rebuilt. */
     private staleModel;
     /** Sessions a user asked to stop; the footer must say 已停止, not 已完成. */
@@ -210,6 +234,39 @@ export declare class FeishuBridge {
     setModel(sessionKey: string, selection: ModelSelection): Promise<void>;
     /** Current `/model` override, for /status and /model without arguments. */
     modelOverride(sessionKey: string): ModelSelection | undefined;
+    /**
+     * Make the live agent use the route this conversation should be on now.
+     *
+     * Why this exists (2026-11-16): `agentOptions` only seeds a NEW agent. A chat
+     * that already has one keeps its creation-time model, so changing the panel
+     * default did nothing for it — and because `/new` was the only way users knew
+     * to start over, that did not help either once an agent was live. A full dsh
+     * restart was the only cure, which is exactly the report.
+     *
+     * Three rules, checked once per turn:
+     *   1. a panel edit (the config route moved) wins — pin it, or rebuild the
+     *      agent when the core has no live `agent.model` handle;
+     *   2. a `/model` override wins over the panel;
+     *   3. a model switched from the chat UI wins over the panel for that
+     *      conversation until either of the first two changes again.
+     */
+    private enforceRoute;
+    /** The panel's own route, as one comparable string ('' when it defers to the host). */
+    private configRouteKey;
+    /** Refresh the session's "last message" stamp (drives the idle reset clock). */
+    private touchSession;
+    /**
+     * Drop a conversation's session when the reset policy says it is stale.
+     *
+     * Called at the head of every turn. A live agent holds the context in memory,
+     * so the live one is disposed too — otherwise "new session" would still answer
+     * with yesterday's thread.
+     *
+     * @returns the reason the conversation was reset, or undefined when kept
+     */
+    private rollSession;
+    /** The turn cap in effect right now (a getter, so a panel edit applies at once). */
+    private turnTimeout;
     /** Forget a conversation's live agent (the next message rebuilds it). */
     private dropLive;
     /** What /status reports for one conversation. */

@@ -34,6 +34,8 @@ export interface Draft {
     requireMentionInGroups: boolean;
     respondToMentionAll: boolean;
     allowBots: BotPolicy;
+    resetIdleHours: number;
+    resetDailyHour: number;
     sessionScope: SessionScope;
     replyMode: ReplyMode;
     footerFields: FooterField[];

@@ -23,6 +23,8 @@ export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
     groupSenderAllowlist: Schema<NoInfer<string[]>, NoInfer<string[]>, "volatile">;
     requireMentionInGroups: Schema<boolean, boolean, "volatile-defined">;
     respondToMentionAll: Schema<boolean, boolean, "volatile-defined">;
+    resetIdleHours: Schema<number, number, "volatile-defined">;
+    resetDailyHour: Schema<number, number, "volatile-defined">;
     sessionScope: Schema<"chat" | "thread" | "sender", "chat" | "thread" | "sender", "volatile-defined">;
     replyMode: Schema<"streaming" | "text", "streaming" | "text", "volatile-defined">;
     footerFields: Schema<NoInfer<("model" | "status" | "context" | "elapsed" | "tokens")[]>, NoInfer<("model" | "status" | "context" | "elapsed" | "tokens")[]>, "volatile-defined">;
@@ -49,6 +51,8 @@ export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
     groupSenderAllowlist: Schema<NoInfer<string[]>, NoInfer<string[]>, "volatile">;
     requireMentionInGroups: Schema<boolean, boolean, "volatile-defined">;
     respondToMentionAll: Schema<boolean, boolean, "volatile-defined">;
+    resetIdleHours: Schema<number, number, "volatile-defined">;
+    resetDailyHour: Schema<number, number, "volatile-defined">;
     sessionScope: Schema<"chat" | "thread" | "sender", "chat" | "thread" | "sender", "volatile-defined">;
     replyMode: Schema<"streaming" | "text", "streaming" | "text", "volatile-defined">;
     footerFields: Schema<NoInfer<("model" | "status" | "context" | "elapsed" | "tokens")[]>, NoInfer<("model" | "status" | "context" | "elapsed" | "tokens")[]>, "volatile-defined">;

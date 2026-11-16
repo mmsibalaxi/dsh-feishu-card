@@ -59,10 +59,12 @@ import { RECENT_PATH, agoText, parseRecent, type RecentSnapshot } from './recent
 import {
   authUrl,
   chatSearchUrl,
+  identityUrl,
   namesUrl,
   parseAuth,
   parseFound,
   parseFoundChats,
+  parseIdentity,
   parseNames,
   searchUrl,
   type AuthState,
@@ -421,6 +423,7 @@ function IdListField({
   searchable,
   searchChats,
   names,
+  staleApps,
   unknownLabel = '未知',
   note,
   onAuthChange,
@@ -442,6 +445,13 @@ function IdListField({
   searchChats?: boolean
   /** id → display name. The panel shows the name and NEVER the raw id. */
   names?: Record<string, string>
+  /**
+   * id → the App ID it belongs to, for entries left behind by a previous bot.
+   *
+   * open_ids are per Feishu app, so after an App ID switch these entries can
+   * never match again (2026-11-11).
+   */
+  staleApps?: Record<string, string>
   /** Shown when a name is not known yet (e.g. 未知用户 / 未知群). */
   unknownLabel?: string
   /** One-line explanation under the chips (e.g. why a name is missing). */
@@ -499,14 +509,15 @@ function IdListField({
           {ids.map((id) => {
             const name = names?.[id]
             const ok = idFormatOk(id, prefix)
+            const staleApp = staleApps?.[id]
             return (
               <span
                 key={id}
                 className={cls.chip}
-                data-tone={ok ? undefined : 'warning'}
+                data-tone={staleApp ? 'stale' : ok ? undefined : 'warning'}
                 // The id stays reachable on hover: the person configuring this
                 // never needs to read it, but support/debugging sometimes does.
-                title={id}
+                title={staleApp ? `${id}\n属于旧机器人 ${staleApp}，当前机器人不可用` : id}
               >
                 {name ? (
                   <span className={cls.chipName}>{name}</span>
@@ -515,6 +526,11 @@ function IdListField({
                     {unknownLabel}
                   </span>
                 )}
+                {staleApp ? (
+                  <span className={cls.chipNote} title={staleApp}>
+                    旧应用
+                  </span>
+                ) : null}
                 <button
                   type="button"
                   className={cls.chipX}
@@ -756,6 +772,8 @@ function DirectorySearchBox({
  * hand used to mean pasting an `oc_…` id copied out of a payload — the user asked
  * for the same convenience the people list has (2026-11-10).
  */
+/** How many groups the picker may render at once (2026-11-11: 太多了). */
+const MAX_CHAT_RESULTS = 20
 function GroupSearchBox({
   disabled,
   onPick,
@@ -774,10 +792,17 @@ function GroupSearchBox({
     try {
       const response = await fetch(chatSearchUrl(text))
       const parsed = parseFoundChats(await response.json())
-      setFound(parsed.chats)
+      // A bot in a hundred groups must not turn this box into a wall of chips
+      // (2026-11-11): show the first 20 and say how to narrow it down.
+      const shown = parsed.chats.slice(0, MAX_CHAT_RESULTS)
+      setFound(shown)
       if (parsed.error) setNote(parsed.error)
-      else if (parsed.chats.length === 0 && text.trim()) {
+      else if (shown.length === 0 && text.trim()) {
         setNote('没搜到群。机器人只能搜到「自己在的群」，先把它拉进群再试。')
+      } else if (parsed.chats.length > shown.length) {
+        setNote(
+          `共 ${parsed.chats.length} 个群，只显示前 ${MAX_CHAT_RESULTS} 个；输入关键字再搜可以缩小范围。`,
+        )
       }
     } catch (error) {
       setNote(`搜索失败：${String(error).slice(0, 160)}`)
@@ -1004,6 +1029,37 @@ function SettingsPage({
     return `有 ${missing} 个名字解析不出来（可能不在应用可见范围内），鼠标悬停可以看到对应 id。`
   }
 
+  /**
+   * open_ids left behind by a previous bot identity.
+   *
+   * Feishu open_ids are scoped to one app, so after switching App ID every old
+   * entry silently stops matching. The Host remembers each id's birth app; here
+   * they get a 「旧应用」 tag and a one-click clean (2026-11-11).
+   */
+  const [staleApps, setStaleApps] = useState<Record<string, string>>({})
+  const personIds = [...draft.allowlist, ...draft.groupSenderAllowlist]
+    .filter((id) => id.startsWith('ou_'))
+    .join(',')
+  useEffect(() => {
+    if (!personIds) {
+      setStaleApps({})
+      return
+    }
+    let alive = true
+    fetch(identityUrl(personIds.split(',')))
+      .then((response) => response.json())
+      .then((payload) => {
+        if (alive) setStaleApps(parseIdentity(payload).stale)
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [personIds])
+  const stalePeople = Object.keys(staleApps).filter((id) =>
+    [...draft.allowlist, ...draft.groupSenderAllowlist].includes(id),
+  )
+
   const mutate = async (ops: PathOp[]): Promise<boolean> => {
     const target = hostForm ?? ownForm
     return target.mutate(ops, snapshot.revision)
@@ -1141,29 +1197,54 @@ function SettingsPage({
           />
         </Field>
         {showAllowlist ? (
-          <IdListField
-            label="允许的人"
-            ids={draft.allowlist}
-            prefix="ou_"
-            placeholder="粘贴 open_id，回车加入；逗号、空格、连着写都能认"
-            hint="open_id 按应用隔离，同一个人在不同应用下不一样。不会取可以让 agent 代劳，它能按姓名从飞书查到。"
-            disabled={disabled}
-            badges={badge('allowlist')}
-            searchable
-            names={names}
-            unknownLabel="未知用户"
-            note={unresolved(draft.allowlist)}
-            onAuthChange={(state) => {
-              // Newly authorised (or re-authorised) → the names are reachable
-              // again; asking now is what turns 未知用户 into 张三 without a reload.
-              if (state.authorized) setNamesEpoch((value) => value + 1)
-            }}
-            suggestions={recentSeen.people.map((row) => ({
-              id: row.openId,
-              note: `${agoText(row.at)}${row.count > 1 ? ` · ${row.count} 条` : ''}`,
-            }))}
-            onChange={(next) => set('allowlist', next)}
-          />
+          <>
+            {stalePeople.length > 0 ? (
+              <p className={cls.invalid}>
+                有 {stalePeople.length} 个 open_id 属于上一个机器人身份（open_id 按应用隔离，换了 App ID 就失效）。
+                <button
+                  type="button"
+                  className={cls.reset}
+                  disabled={disabled}
+                  onClick={() => {
+                    setSavedNote(undefined)
+                    setEdits((previous) => ({
+                      ...previous,
+                      allowlist: draft.allowlist.filter((id) => !staleApps[id]),
+                      groupSenderAllowlist: draft.groupSenderAllowlist.filter(
+                        (id) => !staleApps[id],
+                      ),
+                    }))
+                  }}
+                >
+                  移除这些旧 open_id
+                </button>
+              </p>
+            ) : null}
+            <IdListField
+              label="允许的人"
+              ids={draft.allowlist}
+              prefix="ou_"
+              placeholder="粘贴 open_id，回车加入；逗号、空格、连着写都能认"
+              hint="open_id 按应用隔离，同一个人在不同应用下不一样。不会取可以让 agent 代劳，它能按姓名从飞书查到。"
+              disabled={disabled}
+              badges={badge('allowlist')}
+              searchable
+              names={names}
+              staleApps={staleApps}
+              unknownLabel="未知用户"
+              note={unresolved(draft.allowlist)}
+              onAuthChange={(state) => {
+                // Newly authorised (or re-authorised) → the names are reachable
+                // again; asking now is what turns 未知用户 into 张三 without a reload.
+                if (state.authorized) setNamesEpoch((value) => value + 1)
+              }}
+              suggestions={recentSeen.people.map((row) => ({
+                id: row.openId,
+                note: `${agoText(row.at)}${row.count > 1 ? ` · ${row.count} 条` : ''}`,
+              }))}
+              onChange={(next) => set('allowlist', next)}
+            />
+          </>
         ) : null}
         <Field label="群聊策略" badges={badge('groupPolicy')}>
           <Segmented
@@ -1200,6 +1281,7 @@ function SettingsPage({
               disabled={disabled}
               badges={badge('groupSenderAllowlist')}
               names={names}
+              staleApps={staleApps}
               unknownLabel="未知用户"
               suggestions={recentSeen.people.map((row) => ({
                 id: row.openId,
@@ -1245,6 +1327,46 @@ function SettingsPage({
             options={SCOPE_OPTIONS}
             disabled={disabled}
             onChange={(next) => set('sessionScope', next)}
+          />
+        </Field>
+        <Field
+          label="空闲多久开新会话"
+          htmlFor="feishu-reset-idle"
+          hint="小时。填 0 表示永不重置；填 6 就是「6 小时没说话，下一条消息重新开始」"
+          badges={badge('resetIdleHours')}
+        >
+          <input
+            id="feishu-reset-idle"
+            className={cls.input}
+            type="number"
+            min={0}
+            max={720}
+            step={1}
+            value={String(draft.resetIdleHours)}
+            disabled={disabled}
+            onChange={(event) => set('resetIdleHours', Number(event.target.value) || 0)}
+          />
+        </Field>
+        <Field
+          label="每天几点开新会话"
+          htmlFor="feishu-reset-daily"
+          hint="0-23 的整点，按本机时区。填 -1 表示不按天重置；填 4 就是每天凌晨 4 点后的第一条消息开新会话"
+          badges={badge('resetDailyHour')}
+        >
+          <input
+            id="feishu-reset-daily"
+            className={cls.input}
+            type="number"
+            min={-1}
+            max={23}
+            step={1}
+            value={String(draft.resetDailyHour)}
+            disabled={disabled}
+            onChange={(event) => {
+              const raw = Number(event.target.value)
+              const next = Number.isFinite(raw) ? Math.min(23, Math.max(-1, Math.trunc(raw))) : -1
+              set('resetDailyHour', next)
+            }}
           />
         </Field>
         <Field label="回复模式" badges={badge('replyMode')}>

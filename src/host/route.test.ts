@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   AUTH_PATH,
   CHAT_SEARCH_PATH,
+  IDENTITY_PATH,
   MODELS_PATH,
   NAMES_PATH,
   RECENT_PATH,
@@ -69,6 +70,11 @@ const deps: PanelRouteDeps = {
     chats: async (ids) => (ids.includes('oc_sql') ? { oc_sql: '研发群' } : {}),
     chatSearch: async (query) =>
       query === 'SQL' ? { chats: [{ chatId: 'oc_sql', name: '研发群' }] } : { chats: [] },
+  },
+  identity: {
+    appId: () => 'cli_new',
+    staleAmong: (ids) => (ids.includes('ou_old') ? { ou_old: 'cli_old' } : {}),
+    remember: () => {},
   },
 }
 
@@ -222,6 +228,14 @@ describe('handlePanelRequest', () => {
     expect(recorded.body).toEqual({ ok: true, chats: [], error: '还没配置 App ID' })
   })
 
+  it('flags open_ids left behind by a previous app', async () => {
+    // open_ids are per app: after switching App ID the old entries can never
+    // match again, and the panel says which app they came from.
+    const { res, recorded } = recorder()
+    await handlePanelRequest(get(`${IDENTITY_PATH}?ids=ou_old,ou_keep`), res, deps)
+    expect(recorded.body).toEqual({ ok: true, appId: 'cli_new', stale: { ou_old: 'cli_old' } })
+  })
+
   it('rejects non-GET', async () => {
     const { res, recorded } = recorder()
     await handlePanelRequest({ method: 'POST', url: MODELS_PATH }, res, deps)
@@ -270,6 +284,7 @@ describe('registerPanelRoutes', () => {
       SEARCH_PATH,
       NAMES_PATH,
       CHAT_SEARCH_PATH,
+      IDENTITY_PATH,
     ])
     for (const off of effects) off()
     expect(disposed).toEqual([
@@ -279,6 +294,7 @@ describe('registerPanelRoutes', () => {
       SEARCH_PATH,
       NAMES_PATH,
       CHAT_SEARCH_PATH,
+      IDENTITY_PATH,
     ])
   })
 

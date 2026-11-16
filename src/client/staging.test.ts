@@ -67,6 +67,16 @@ describe('isDirty / sameDraft', () => {
   it('notices the toolbar toggle', () => {
     expect(isDirty(draft({ showPanel: false }), draft())).toBe(true)
   })
+
+  it('defaults the idle reset clock to six hours', () => {
+    expect(draftFrom(config()).resetIdleHours).toBe(6)
+    expect(draftFrom(config()).resetDailyHour).toBe(-1)
+  })
+
+  it('notices a changed reset clock', () => {
+    expect(isDirty(draft({ resetIdleHours: 12 }), draft())).toBe(true)
+    expect(isDirty(draft({ resetDailyHour: 4 }), draft())).toBe(true)
+  })
 })
 
 describe('saveOps', () => {

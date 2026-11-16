@@ -25,6 +25,14 @@ export interface SeenSender {
   at: number
   /** How many messages seen from them, so a repeat sender sorts higher. */
   count: number
+  /**
+   * The last message they sent.
+   *
+   * `im/v1/messages/{id}?with_sender_name=true` is readable with the BOT token
+   * and returns the sender's display name — the only way to name somebody
+   * outside the app's contact scope (2026-11-12).
+   */
+  messageId?: string
 }
 
 export interface RecentContactsOptions {
@@ -67,6 +75,9 @@ export class RecentContacts {
             chatId: entry.chatId,
             at: typeof entry.at === 'number' ? entry.at : 0,
             count: typeof entry.count === 'number' ? entry.count : 1,
+            ...(typeof entry.messageId === 'string' && entry.messageId
+              ? { messageId: entry.messageId }
+              : {}),
           })
         }
       }
@@ -80,7 +91,7 @@ export class RecentContacts {
   }
 
   /** Record one inbound message's sender. Cheap: in-memory, save is debounced. */
-  note(openId: string, chatId: string, at = Date.now()): void {
+  note(openId: string, chatId: string, at = Date.now(), messageId?: string): void {
     if (!openId || !chatId) return
     const previous = this.senders.get(openId)
     // Re-insert so Map iteration order (and therefore `list()`) stays newest-first.
@@ -90,6 +101,7 @@ export class RecentContacts {
       chatId,
       at,
       count: (previous?.count ?? 0) + 1,
+      ...(messageId ? { messageId } : previous?.messageId ? { messageId: previous.messageId } : {}),
     })
     this.trim()
     this.scheduleSave()

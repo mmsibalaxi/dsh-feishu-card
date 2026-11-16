@@ -23,6 +23,7 @@ import { channelPrompt, type ChannelFacts } from './channel.ts'
 import { StreamingCard } from './card/streaming.ts'
 import { trace } from './trace.ts'
 import type { SessionStore } from './sessions.ts'
+import { resetNotice, resetReason, type ResetPolicy, type ResetReason } from './session-reset.ts'
 
 /** Turn timeout; TODO: expose in the panel. */
 const TURN_TIMEOUT_MS = 10 * 60 * 1000
@@ -52,7 +53,22 @@ interface SelectionRef {
  * and uses it for `applyConfiguredRoute()`. Present ⇒ we may switch routes.
  */
 interface AgentModelHandle {
-  select(next: ModelSelection): void
+  select(next: ModelSelection): void | Promise<void>
+}
+
+/** A route as one comparable string (`provider/model[/effort]`). */
+function routeKey(selection: { provider?: string; model?: string; reasoningEffort?: string } | undefined): string {
+  if (!selection?.provider || !selection.model) return ''
+  const effort = selection.reasoningEffort ? `/${selection.reasoningEffort}` : ''
+  return `${selection.provider}/${selection.model}${effort}`
+}
+
+/** The route one live agent is actually using, as the same string. */
+function agentRouteKey(agent: Agent): string {
+  const options = agent.options as
+    | { provider?: string; model?: string; reasoningEffort?: string }
+    | undefined
+  return routeKey(options)
 }
 
 /**
@@ -67,15 +83,27 @@ interface AgentModelHandle {
  * Cores without `agent.model` have no such API; there the route stays whatever
  * the log/`agentOptions` says.
  */
-function pinSelection(agent: Agent, selection: ModelSelection, log?: { warn(msg: string): void }): void {
+function pinSelection(
+  agent: Agent,
+  selection: ModelSelection,
+  log?: { warn(msg: string): void },
+): boolean {
   const model = (agent as unknown as { model?: AgentModelHandle }).model
-  if (model === undefined) return
+  if (model === undefined) return false
   try {
-    model.select(selection)
+    const result = model.select(selection)
+    // A newer core may return a promise; a rejection is a refusal, not a pin.
+    if (result && typeof (result as Promise<void>).then === 'function') {
+      void (result as Promise<void>).catch((error: unknown) => {
+        log?.warn(`feishu-card: async pin ${selection.provider}/${selection.model} failed: ${error}`)
+      })
+    }
+    return true
   } catch (error) {
     // Never fail the turn over a route pin: the session's recorded model is
     // still valid, and the next rebuild will try again.
     log?.warn(`feishu-card: could not pin ${selection.provider}/${selection.model}: ${String(error)}`)
+    return false
   }
 }
 
@@ -100,8 +128,16 @@ function pinSelection(agent: Agent, selection: ModelSelection, log?: { warn(msg:
  * happen only through `agentOptions` at create/resume — see `ensureAgent`.
  */
 function installPromptModelVariables(agentCtx: Context, selection: SelectionRef) {
-  return agentCtx.on('system-prompt/assemble', async (_assembly, _context, next) => {
-    const selected = selection.current
+  return agentCtx.on('system-prompt/assemble', async (_assembly, context, next) => {
+    // The agent's LIVE route wins over our own record: switching the model from
+    // the chat UI changes `agent.options` without touching this plugin, and the
+    // prompt must not then claim the old model (2026-11-16).
+    const liveAgent = (context as { agent?: Agent } | undefined)?.agent
+    const live = liveAgent?.options
+    const selected =
+      live?.provider && live.model
+        ? { provider: live.provider, model: live.model }
+        : selection.current
     const assembled = await next()
     // The channel section is appended on every assembly (not registered once):
     // this listener is scoped to the agent, so the facts cannot leak into
@@ -233,6 +269,12 @@ export interface TurnRequest {
   /** Bot display name / open_id, when the host knows them. */
   botName?: string
   botOpenId?: string
+  /**
+   * Set by the bridge (not the caller) when THIS turn had to start a new
+   * session because the old one went stale. Prepended to the prompt so the
+   * model knows why it has no context, and used for the card's hint.
+   */
+  resetNotice?: string
 }
 
 interface LiveAgent {
@@ -340,7 +382,14 @@ export interface BridgeOptions {
     register(agentCtx: Context): void
   }
   /** Hard cap on one turn; the agent is cancelled when it expires. */
-  turnTimeoutMs?: number
+  turnTimeoutMs?: number | (() => number)
+  /**
+   * When a conversation starts over (idle gap / daily hour). Read per turn, so
+   * a panel edit applies to the next message instead of the next restart.
+   */
+  resetPolicy?: () => ResetPolicy
+  /** Clock override for tests (the reset clocks are time-based). */
+  now?: () => number
 }
 
 export class FeishuBridge {
@@ -363,6 +412,16 @@ export class FeishuBridge {
    * the agent for that conversation is rebuilt, so the next turn gets it.
    */
   private modelOverrides = new Map<string, ModelSelection>()
+  /**
+   * Per conversation: the route this plugin considers authoritative, and where
+   * that decision came from. `agent` means somebody switched the model elsewhere
+   * (the chat UI) and the panel default must not stomp it back.
+   */
+  private routed = new Map<string, { key: string; source: 'config' | 'override' | 'agent' }>()
+  /** Last observed agent routes, to notice a switch made outside this plugin. */
+  private seenRoute = new Map<string, string>()
+  /** The panel's route as of the previous turn, to tell a panel edit from a chat switch. */
+  private lastConfigRoute = ''
   /** Sessions whose live agent uses a stale model and must be rebuilt. */
   private staleModel = new Set<string>()
   /** Sessions a user asked to stop; the footer must say 已停止, not 已完成. */
@@ -396,7 +455,16 @@ export class FeishuBridge {
 
   async handleMessage(request: TurnRequest): Promise<TurnResult> {
     return this.enqueue(request.sessionKey, async () => {
-      const live = await this.ensureAgent(request.sessionKey, request.chatId, request)
+      // A stale conversation starts over before anything else looks at it, so a
+      // resumed log from yesterday never leaks into today's answer (2026-11-16).
+      const rolled = await this.rollSession(request.sessionKey)
+      if (rolled) request = { ...request, resetNotice: resetNotice(rolled, this.options.resetPolicy?.() ?? { idleHours: 0, dailyHour: -1 }) }
+      let live = await this.ensureAgent(request.sessionKey, request.chatId, request)
+      // A live agent's route is fixed when it is built, so a panel edit (or the
+      // host's default) only reached FRESH sessions — every running conversation
+      // kept the old model until dsh itself restarted (user report 2026-11-16).
+      // Re-check on every turn: pin the wanted route, or rebuild the agent.
+      live = await this.enforceRoute(request.sessionKey, live, request.chatId)
       this.running.add(request.sessionKey)
       if (request.senderOpenId) this.turnOwners.set(request.sessionKey, request.senderOpenId)
       try {
@@ -404,6 +472,8 @@ export class FeishuBridge {
       } finally {
         this.running.delete(request.sessionKey)
         this.turnOwners.delete(request.sessionKey)
+        // The idle clock runs from the last message, not from session creation.
+        await this.touchSession(request.sessionKey)
         // A `/model` switch mid-turn could not swap the live agent (its model
         // is fixed at creation); rebuild it now that the turn has settled.
         if (this.staleModel.delete(request.sessionKey)) await this.dropLive(request.sessionKey)
@@ -457,11 +527,138 @@ export class FeishuBridge {
     return this.modelOverrides.get(sessionKey)
   }
 
+  /**
+   * Make the live agent use the route this conversation should be on now.
+   *
+   * Why this exists (2026-11-16): `agentOptions` only seeds a NEW agent. A chat
+   * that already has one keeps its creation-time model, so changing the panel
+   * default did nothing for it — and because `/new` was the only way users knew
+   * to start over, that did not help either once an agent was live. A full dsh
+   * restart was the only cure, which is exactly the report.
+   *
+   * Three rules, checked once per turn:
+   *   1. a panel edit (the config route moved) wins — pin it, or rebuild the
+   *      agent when the core has no live `agent.model` handle;
+   *   2. a `/model` override wins over the panel;
+   *   3. a model switched from the chat UI wins over the panel for that
+   *      conversation until either of the first two changes again.
+   */
+  private async enforceRoute(
+    sessionKey: string,
+    live: LiveAgent,
+    chatId: string,
+  ): Promise<LiveAgent> {
+    const configKey = this.configRouteKey()
+    const configChanged = configKey !== this.lastConfigRoute
+    this.lastConfigRoute = configKey
+
+    const desired = this.modelSelection(sessionKey)
+    const wanted = routeKey(desired)
+    if (!wanted) return live
+
+    const actual = agentRouteKey(live.handle.agent)
+    const seen = this.seenRoute.get(sessionKey)
+    this.seenRoute.set(sessionKey, actual)
+    const recorded = this.routed.get(sessionKey)
+
+    // Rule 3: the route moved on its own since we last looked — the chat UI
+    // switched it. Adopt it instead of pinning the panel route back.
+    if (
+      !configChanged &&
+      actual &&
+      seen !== undefined &&
+      actual !== seen &&
+      actual !== recorded?.key
+    ) {
+      this.routed.set(sessionKey, { key: actual, source: 'agent' })
+      trace('route-adopted', { sessionKey, route: actual, panel: wanted })
+      return live
+    }
+    if (recorded?.source === 'agent' && !configChanged) return live
+    if (recorded?.key === wanted) return live
+    if (actual === wanted) {
+      this.routed.set(sessionKey, { key: wanted, source: 'agent' })
+      return live
+    }
+
+    const pinned = pinSelection(live.handle.agent, desired as ModelSelection, this.ctx.logger)
+    if (pinned) {
+      this.routed.set(sessionKey, {
+        key: wanted,
+        source: this.modelOverrides.has(sessionKey) ? 'override' : 'config',
+      })
+      trace('route-pinned', { sessionKey, route: wanted, from: actual })
+      return live
+    }
+    // A core without the live handle (or one that refused) can only pick a route
+    // at construction: rebuild the agent around the same, resumable session.
+    trace('route-rebuild', { sessionKey, route: wanted, from: actual })
+    this.ctx.logger.info(
+      `feishu-card: rebuilding ${sessionKey} to switch to ${wanted} (agentOptions only seed new agents)`,
+    )
+    await this.dropLive(sessionKey)
+    const rebuilt = await this.ensureAgent(sessionKey, chatId)
+    this.seenRoute.delete(sessionKey)
+    return rebuilt
+  }
+
+  /** The panel's own route, as one comparable string ('' when it defers to the host). */
+  private configRouteKey(): string {
+    const config = this.options.model?.()
+    return config?.provider && config.model ? routeKey(config) : ''
+  }
+
+  /** Refresh the session's "last message" stamp (drives the idle reset clock). */
+  private async touchSession(sessionKey: string): Promise<void> {
+    const record = this.options.store.get(sessionKey)
+    if (!record) return
+    await this.options.store
+      .put(sessionKey, { ...record, updatedAt: (this.options.now ?? Date.now)() })
+      .catch(() => undefined)
+  }
+
+  /**
+   * Drop a conversation's session when the reset policy says it is stale.
+   *
+   * Called at the head of every turn. A live agent holds the context in memory,
+   * so the live one is disposed too — otherwise "new session" would still answer
+   * with yesterday's thread.
+   *
+   * @returns the reason the conversation was reset, or undefined when kept
+   */
+  private async rollSession(sessionKey: string): Promise<ResetReason | undefined> {
+    const policy = this.options.resetPolicy?.()
+    if (!policy || (policy.idleHours <= 0 && policy.dailyHour < 0)) return undefined
+    await this.options.store.load()
+    const reason = resetReason(this.options.store.get(sessionKey), policy, (this.options.now ?? Date.now)())
+    if (!reason) return undefined
+    this.ctx.logger.info(`feishu-card: ${sessionKey} starts a new session (${reason})`)
+    trace('session-rolled', { sessionKey, reason })
+    // Same bookkeeping as /new, minus the user-facing confirmation: the pickup
+    // from /model must not survive a rollover either.
+    this.poisoned.add(sessionKey)
+    this.modelOverrides.delete(sessionKey)
+    this.routed.delete(sessionKey)
+    this.seenRoute.delete(sessionKey)
+    await this.stop(sessionKey, { settleTurn: false })
+    await this.options.store.remove(sessionKey)
+    this.poisoned.delete(sessionKey)
+    return reason
+  }
+
+  /** The turn cap in effect right now (a getter, so a panel edit applies at once). */
+  private turnTimeout(): number {
+    const value = this.options.turnTimeoutMs
+    const resolved = typeof value === 'function' ? value() : value
+    return resolved && Number.isFinite(resolved) && resolved > 0 ? resolved : TURN_TIMEOUT_MS
+  }
+
   /** Forget a conversation's live agent (the next message rebuilds it). */
   private async dropLive(sessionKey: string): Promise<void> {
     const live = this.live.get(sessionKey)
     if (!live) return
     this.live.delete(sessionKey)
+    this.routed.delete(sessionKey)
     await live.handle.dispose().catch((error) => {
       this.ctx.logger.debug(`feishu-card: dropLive dispose failed for ${sessionKey}: ${error}`)
     })
@@ -484,6 +681,11 @@ export class FeishuBridge {
     // message arriving in between would otherwise resume the very session we
     // are dropping (an archived one blocks forever).
     this.poisoned.add(sessionKey)
+    // A fresh conversation follows the CONFIGURED route again: a `/model` pickup
+    // is scoped to the conversation it was typed in, and letting it survive
+    // /new meant the panel default could never take effect there (2026-11-16).
+    this.modelOverrides.delete(sessionKey)
+    this.routed.delete(sessionKey)
     // `settleTurn: false` — reset is called from inside a finishing turn (the
     // blocked branch), whose own result must not be replaced by a stop.
     await this.stop(sessionKey, { settleTurn: false })
@@ -587,6 +789,13 @@ export class FeishuBridge {
     // recorded selection and would ignore the panel/`/model` choice. Pin it now,
     // before the first step runs.
     if (selection) pinSelection(handle.agent, selection, this.ctx.logger)
+    // Remember what this agent was built with, so the first turn does not pin
+    // the very route it already has.
+    this.routed.set(sessionKey, {
+      key: routeKey(selection) || agentRouteKey(handle.agent),
+      source: this.modelOverrides.has(sessionKey) ? 'override' : 'config',
+    })
+    this.seenRoute.set(sessionKey, agentRouteKey(handle.agent))
 
     const live: LiveAgent = { handle, sessionKey }
     this.live.set(sessionKey, live)
@@ -610,7 +819,11 @@ export class FeishuBridge {
     await this.options.store.put(sessionKey, {
       sessionId: handle.agent.id,
       workspace,
-      updatedAt: Date.now(),
+      updatedAt: (this.options.now ?? Date.now)(),
+      // The daily reset clock is anchored on when the session STARTED, not on
+      // its last message: a thread that began before today's hour is the one
+      // that should be dropped.
+      createdAt: record?.createdAt ?? (this.options.now ?? Date.now)(),
     })
     trace('agent-ready', {
       sessionKey,
@@ -641,7 +854,14 @@ export class FeishuBridge {
     const message: UserMessage = {
       id: asMessageId(randomUUID()),
       role: 'user',
-      content: [{ type: 'text', text: request.text }],
+      content: [
+        {
+          type: 'text',
+          // The notice goes first so the model reads it as context for the
+          // message, not as part of the question (2026-11-16).
+          text: request.resetNotice ? `${request.resetNotice}\n\n${request.text}` : request.text,
+        },
+      ],
       source: { kind: 'user' },
     }
     const model = agent.options?.model
@@ -869,7 +1089,7 @@ export class FeishuBridge {
         }
         void card?.abort()
         finish(turnResult(true, 'timed-out'))
-      }, this.options.turnTimeoutMs ?? TURN_TIMEOUT_MS)
+      }, this.turnTimeout())
       if (typeof timer.unref === 'function') timer.unref()
 
       /**
@@ -880,7 +1100,7 @@ export class FeishuBridge {
        */
       const turnResult = (timedOut: boolean, reason: TurnEnd = 'completed'): TurnResult => ({
         text: timedOut && !buffer.trim()
-          ? `（超过 ${Math.round((this.options.turnTimeoutMs ?? TURN_TIMEOUT_MS) / 60000)} 分钟未响应，已停止等待。可再发一条继续）`
+          ? `（超过 ${Math.round(this.turnTimeout() / 60000)} 分钟未响应，已停止等待。可再发一条继续）`
           : buffer.trim() || NO_OUTPUT,
         model,
         timedOut,
@@ -957,6 +1177,7 @@ export class FeishuBridge {
         this.ctx.logger.debug(`feishu-card: cancel failed for ${sessionKey}: ${error}`)
       }
       this.live.delete(sessionKey)
+      this.routed.delete(sessionKey)
     }
     // Settle the promise directly when a turn is in flight; its own seal path
     // then says 已停止 and the runtime stops waiting on Feishu events.
@@ -973,4 +1194,5 @@ export class FeishuBridge {
     for (const key of [...this.live.keys()]) await this.stop(key)
   }
 }
+
 

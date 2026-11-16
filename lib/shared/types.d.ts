@@ -38,6 +38,10 @@ export interface FeishuCardConfig {
     groupSenderAllowlist: string[];
     requireMentionInGroups: boolean;
     respondToMentionAll: boolean;
+    /** Start a new session after this many hours without a message (0 = never). */
+    resetIdleHours: number;
+    /** Local hour (0-23) at which every conversation restarts; -1 = never. */
+    resetDailyHour: number;
     sessionScope: SessionScope;
     replyMode: ReplyMode;
     footerFields: FooterField[];

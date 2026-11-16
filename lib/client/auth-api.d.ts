@@ -8,6 +8,7 @@ export declare const AUTH_PATH = "/api/feishu-card/auth";
 export declare const SEARCH_PATH = "/api/feishu-card/search";
 export declare const NAMES_PATH = "/api/feishu-card/names";
 export declare const CHAT_SEARCH_PATH = "/api/feishu-card/chat-search";
+export declare const IDENTITY_PATH = "/api/feishu-card/identity";
 /** What the panel needs to render the authorisation state. */
 export interface AuthState {
     authorized: boolean;
@@ -41,6 +42,20 @@ export declare function authUrl(action: 'state' | 'begin' | 'poll' | 'forget'): 
 export declare function searchUrl(query: string): string;
 /** Keyword search over the groups the bot can see (no delegated token needed). */
 export declare function chatSearchUrl(query: string): string;
+/**
+ * Which entries belong to a previous bot identity.
+ *
+ * open_ids are per Feishu app, so after an App ID switch every allowlist entry
+ * is dead. The Host knows each id's birth app; the panel just renders the verdict.
+ */
+export declare function identityUrl(ids: readonly string[]): string;
+export interface IdentityState {
+    /** The App ID this process is configured with. */
+    appId: string;
+    /** open_id → the App ID it was first seen under (only the stale ones). */
+    stale: Record<string, string>;
+}
+export declare function parseIdentity(payload: unknown): IdentityState;
 /** Ask the Host to resolve open_ids to names (comma-separated, like the allowlist). */
 export declare function namesUrl(ids: readonly string[]): string;
 /**

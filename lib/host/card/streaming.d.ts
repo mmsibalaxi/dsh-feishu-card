@@ -198,13 +198,17 @@ export declare class StreamingCard {
     /** Milliseconds since the card was created. */
     private elapsedMs;
     /**
-     * Tick the "thinking" row once a second.
+     * Tick the "still working" row once a second.
      *
      * A static loading icon proves nothing: a user watching a 4-minute turn cannot
      * tell "the model is thinking" from "the card is stuck" (2026-11-11 feedback:
-     * 读秒, 确保不是 bug 卡住了). One character-sized update per second is cheap,
-     * and it is skipped whenever an answer flush is pending so the typewriter
-     * always wins the serialized write chain.
+     * 读秒, 确保不是 bug 卡住了). One character-sized update per second is cheap.
+     *
+     * When a real write is pending, the tick does NOT swallow the second — it
+     * retries in 250ms. Dropping it outright is what made the counter freeze for
+     * 2-3 seconds during a busy tool phase (user report 2026-11-11: 读秒有时候会卡个
+     * 3 秒才跳): the panel flush and the answer flush both hold the serialized
+     * write chain, and the old code skipped the tick instead of waiting.
      */
     private scheduleTick;
     /** One second of the counter. Never lets a failure escape. */
@@ -340,6 +344,31 @@ export declare class StreamingCard {
     private buildFooter;
     private asApi;
 }
+/**
+ * Rotating copy for the waiting row.
+ *
+ * A single frozen "思考中 …" reads like a system message; a line that keeps
+ * changing reads like something is happening (user feedback 2026-11-11: 换成幽默点的
+ * 文案, 多个轮动).
+ */
+export declare const PENDING_LABELS: readonly ["正在搞了", "马上就好", "正在搬砖", "火速处理中", "马上端上来", "手在动了"];
+/**
+ * Seconds between two labels.
+ *
+ * A minute, not a few seconds (user preference 2026-11-11: 换太频繁反而像在抖).
+ * The second counter keeps ticking; only the copy is stable.
+ */
+export declare const PENDING_ROTATE_SECONDS = 60;
+/**
+ * The waiting row's text: a rotating label plus WHOLE seconds.
+ *
+ * Integer seconds on purpose (user feedback 2026-11-11): `7.2s` looks like a
+ * benchmark, `7s` looks like a clock.
+ *
+ * @param elapsedMs - milliseconds since the card was created
+ * @returns e.g. `正在搞了 7s`, or `马上就好 1分12秒` past a minute
+ */
+export declare function pendingLabel(elapsedMs: number): string;
 /** 12.3s / 1m 39s — same shape as hermes' _format_elapsed. */
 export declare function formatElapsed(ms: number): string;
 export { buildFooterElement };

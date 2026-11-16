@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { StreamingCard, formatElapsed, type CardTransport, type StreamingCardOptions } from './streaming.ts'
+import { StreamingCard, formatElapsed, pendingLabel, PENDING_LABELS, type CardTransport, type StreamingCardOptions } from './streaming.ts'
 import type { FooterField } from '../../shared/types.js'
 const FOOTER_FIELDS: FooterField[] = ['status', 'model', 'context', 'elapsed']
 /** CardKit wire action: `{action, params}` (NOT flat `{kind, element_id, content}`). */
@@ -51,6 +51,35 @@ function makeCard(over: Partial<StreamingCardOptions> = {}) {
   })
   return { card, fake }
 }
+
+describe('pendingLabel', () => {
+  it('shows whole seconds, never decimals', () => {
+    // `7.2s` reads like a benchmark; `7s` reads like a clock.
+    const label = pendingLabel(7200)
+    expect(label).toMatch(/^\S+ 7s$/)
+    expect(label).not.toContain('.')
+    expect(label.split(' ')[0]).toMatch(new RegExp(`^(${PENDING_LABELS.join('|')})$`))
+  })
+
+  it('rotates the copy once a minute, not on every tick', () => {
+    const labelAt = (ms: number) => pendingLabel(ms).split(' ')[0]
+    // A few seconds apart: same line, only the counter moves.
+    expect(labelAt(2000)).toBe(labelAt(1000))
+    expect(labelAt(30_000)).toBe(labelAt(1000))
+    // A new minute → a new line.
+    expect(labelAt(61_000)).not.toBe(labelAt(1000))
+    expect(PENDING_LABELS).toContain(labelAt(61_000) as never)
+  })
+
+  it('switches to minutes past a minute', () => {
+    expect(pendingLabel(72_400)).toMatch(/分\d+秒$/)
+    expect(pendingLabel(72_400)).toContain('1分12秒')
+  })
+
+  it('starts at 1s so the row never says 0s', () => {
+    expect(pendingLabel(120)).toMatch(/ 1s$/)
+  })
+})
 
 describe('formatElapsed', () => {
   it('formats like hermes', () => {
@@ -642,10 +671,8 @@ describe('StreamingCard', () => {
     expect(lastFooter(fake)).toContain('已完成')
   })
 
-  it('counts the waiting seconds, then deletes the row on seal', async () => {
-    // 2026-11-11 feedback: 思考中要做读秒, 确保不是 bug 卡住了. The loading row shows
-    // a live second counter; the only writes while waiting are those ticks (the
-    // animated icon itself costs nothing).
+  it('counts the waiting seconds with whole numbers and a rotating label', async () => {
+    // 2026-11-11 feedback: 读秒, 确保不是 bug 卡住了 / 秒数不要小数 / 文案幽默点轮动.
     vi.useFakeTimers()
     try {
       const fake = fakeTransport()
@@ -659,11 +686,20 @@ describe('StreamingCard', () => {
       await vi.advanceTimersByTimeAsync(2500)
       // One tick per second, each touching ONLY the loading row.
       expect(fake.batches).toHaveLength(2)
-      for (const batch of fake.batches) {
+      const ticks = fake.batches.map((batch) => textOf((batch.actions as Action[])[0]))
+      for (const [index, batch] of fake.batches.entries()) {
         expect(batch.actions as Action[]).toHaveLength(1)
         expect(idOf((batch.actions as Action[])[0])).toBe('loading_icon')
-        expect(textOf((batch.actions as Action[])[0])).toContain('思考中')
+        // Whole seconds only: `1s`, `2s` — never `1.2s`.
+        expect(ticks[index]).toMatch(/\s\d+s$/)
       }
+      expect(ticks[0]).toContain('正在搞了')
+      // The label only changes once a minute: a few seconds later it is the same
+      // line with a bigger number.
+      await vi.advanceTimersByTimeAsync(2000)
+      const later = textOf((fake.batches.at(-1)?.actions as Action[])[0])
+      expect(later).toMatch(/\s\d+s$/)
+      expect(later.split(' ')[0]).toBe(ticks[0]?.split(' ')[0])
 
       card.pushAnswer('北京今天晴')
       await vi.advanceTimersByTimeAsync(2000)

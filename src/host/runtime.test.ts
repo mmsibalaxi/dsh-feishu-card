@@ -295,6 +295,31 @@ describe('inbound pipeline (integration, no Feishu)', () => {
     expect(ok.sent).toEqual([{ chatId: 'oc_g1', text: '好的，已完成' }])
   })
 
+  it('names a sender the contact API cannot see, via the message itself', async () => {
+    // Live 2026-11-12: every chip in "机器人见过的人" was 未知用户 because
+    // `contact/v3/users/{id}` answers 41050 outside the app's contact scope.
+    // `message.get?with_sender_name` needs no contact scope at all.
+    const world = makeWorld(
+      fakeConfig({ dmPolicy: 'allowlist', allowlist: ['ou_a'], replyMode: 'text' }),
+      {
+        directory: {
+          names: async () => ({ names: {}, error: '41050 no user authority error' }),
+        },
+        createQuote: () =>
+          ({
+            async fetch() {
+              return undefined
+            },
+            async senderOf() {
+              return { senderOpenId: 'ou_a', senderName: '魏佳乐' }
+            },
+          }) as never,
+      },
+    )
+    await world.runtime.inbound(dm())
+    expect(world.followed[0]).toContain('[发送人 魏佳乐 (ou_a)]')
+  })
+
   it('prefixes the sender name, the mentions and the quoted message', async () => {
     // The four facts the user asked for (2026-11-09): chat id/type in the
     // system prompt, and sender + mentions + quote on the message itself.

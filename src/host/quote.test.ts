@@ -139,6 +139,37 @@ describe('FeishuQuoteFetcher', () => {
     expect(quoted?.senderName).toBe('SomeBot')
   })
 
+  it('reads just the sender of a message (the name fallback)', async () => {
+    // This is how somebody outside the app's contact scope gets a name at all.
+    const fetcher = new FeishuQuoteFetcher({
+      appId: 'cli_test',
+      appSecret: 'secret',
+      brand: 'feishu',
+      get: async () =>
+        wrap({
+          msg_type: 'text',
+          body: { content: JSON.stringify({ text: '帮我看看' }) },
+          sender: { id: 'ou_wang', sender_type: 'user', sender_name: '张三' },
+        }),
+    })
+    await expect(fetcher.senderOf('om_1')).resolves.toEqual({
+      senderOpenId: 'ou_wang',
+      senderName: '张三',
+    })
+  })
+
+  it('senderOf swallows a failure', async () => {
+    const fetcher = new FeishuQuoteFetcher({
+      appId: 'cli_test',
+      appSecret: 'secret',
+      brand: 'feishu',
+      get: async () => {
+        throw new Error('230002 message not found')
+      },
+    })
+    await expect(fetcher.senderOf('om_x')).resolves.toEqual({})
+  })
+
   it('never throws: a failed lookup just yields no quote', async () => {
     const warnings: string[] = []
     const fetcher = new FeishuQuoteFetcher({

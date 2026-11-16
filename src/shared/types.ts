@@ -43,6 +43,10 @@ export interface FeishuCardConfig {
   groupSenderAllowlist: string[]
   requireMentionInGroups: boolean
   respondToMentionAll: boolean
+  /** Start a new session after this many hours without a message (0 = never). */
+  resetIdleHours: number
+  /** Local hour (0-23) at which every conversation restarts; -1 = never. */
+  resetDailyHour: number
   sessionScope: SessionScope
   replyMode: ReplyMode
   footerFields: FooterField[]
@@ -82,6 +86,11 @@ export const CONFIG_DEFAULTS: Omit<FeishuCardConfig, 'appId' | 'appSecret'> = {
   groupSenderAllowlist: [],
   requireMentionInGroups: true,
   respondToMentionAll: false,
+  // hermes-style: six hours of silence starts a new conversation (2026-11-16).
+  // The daily clock stays off until a profile picks an hour — a surprise 4am
+  // reset would be worse than an unreset thread.
+  resetIdleHours: 6,
+  resetDailyHour: -1,
   sessionScope: 'chat',
   replyMode: 'streaming',
   footerFields: DEFAULT_FOOTER_FIELDS,
@@ -130,3 +139,4 @@ export function parseIdList(text: string | undefined): string[] {
 export function formatIdList(ids: readonly string[] | undefined): string {
   return (ids ?? []).join('\n')
 }
+

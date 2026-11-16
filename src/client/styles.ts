@@ -48,6 +48,7 @@ export const cls = {
   chips: 'fc-chips',
   chip: 'fc-chip',
   chipName: 'fc-chipName',
+  chipNote: 'fc-chipNote',
   chipId: 'fc-chipId',
   chipX: 'fc-chipX',
   suggest: 'fc-suggest',
@@ -101,6 +102,8 @@ textarea.${cls.input}{height:auto;min-height:68px;padding:8px 12px;resize:vertic
 .${cls.chips}{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
 .${cls.chip}{display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:3px 4px 3px 10px;border-radius:999px;corner-shape:round;background:var(--dsw-alias-bg-module-platform);font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary)}
 .${cls.chip}[data-tone=warning]{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent);color:var(--dsw-alias-state-warn-primary)}
+.${cls.chip}[data-tone=stale]{background:color-mix(in srgb, var(--dsw-alias-state-error-primary, var(--dsw-alias-state-warn-primary)) 12%, transparent);border:1px dashed color-mix(in srgb, var(--dsw-alias-state-error-primary, var(--dsw-alias-state-warn-primary)) 55%, transparent)}
+.${cls.chipNote}{font-size:11px;line-height:16px;padding:0 4px;border-radius:4px;background:color-mix(in srgb, var(--dsw-alias-state-error-primary, var(--dsw-alias-state-warn-primary)) 16%, transparent);color:var(--dsw-alias-state-error-primary, var(--dsw-alias-state-warn-primary))}
 .${cls.chipId}{font-family:var(--dsh-font-family-code-default, monospace);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px}
 .${cls.chipName}{font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .${cls.chipName}[data-tone=unknown]{color:var(--dsw-alias-label-tertiary);font-style:italic}
